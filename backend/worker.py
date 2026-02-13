@@ -6,6 +6,7 @@ import re
 import difflib
 import urllib.request
 import urllib.error
+from datetime import datetime
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -554,6 +555,38 @@ def find_element_by_ai(page, step_description):
     
     return None, None, None
 
+
+SCRIPT_DIR = "playwright_script"
+SCRIPT_FILE = os.path.join(SCRIPT_DIR, "generatedTest.spec.js")
+
+def init_script():
+    """Create JS playwright script with boilerplate"""
+    os.makedirs(SCRIPT_DIR, exist_ok=True)
+
+    if not os.path.exists(SCRIPT_FILE):
+        with open(SCRIPT_FILE, "w", encoding="utf-8") as f:
+            f.write("""import { test, expect } from '@playwright/test';
+
+            test('Generated Test', async ({ page }) => {
+
+            """)
+            
+def append_script_line(line):
+    with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
+        f.write(f"    {line}\n")
+
+def close_script():
+    with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
+        f.write("""
+        });
+        """)
+
+def js_safe(value):
+    """Escape quotes safely for JS"""
+    if value is None:
+        return ""
+    return str(value).replace("'", "\\'")
+
 def use_locator(page, locator, locator_type, action, value=None):
     """
     Execute an action using the locator, handling both CSS selectors and XPath.
@@ -567,28 +600,47 @@ def use_locator(page, locator, locator_type, action, value=None):
         (success: bool, error: str or None)
     """
     try:
+        init_script()
         # Format locator for Playwright
         if locator_type == 'xpath':
             formatted_locator = f'xpath={locator}'
         else:
             formatted_locator = locator
         
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[Locator] Using {locator_type}: {locator}")
         
         if action == 'click':
             page.click(formatted_locator)
+            append_script_line(f"// {timestamp} click")
+            append_script_line(f"await page.click('{formatted_locator}');")
             return True, None
         
         elif action in ('fill', 'type'):
+            value = js_safe(value)
             page.fill(formatted_locator, str(value) if value else '')
+            append_script_line(f"// {timestamp} fill")
+            append_script_line(
+                f"await page.fill('{formatted_locator}', '{value}');"
+            )
             return True, None
         
         elif action == 'select':
+            value = js_safe(value)
             page.select_option(formatted_locator, str(value) if value else '')
+            append_script_line(f"// {timestamp} select")
+            append_script_line(
+                f"await page.selectOption('{formatted_locator}', '{value}');"
+            )
             return True, None
         
         elif action == 'press':
+            value = js_safe(value if value else "Enter")
             page.press(formatted_locator, str(value) if value else 'Enter')
+            append_script_line(f"// {timestamp} press")
+            append_script_line(
+                f"await page.press('{formatted_locator}', '{value}');"
+            )
             return True, None
         
         elif action == 'validate':
@@ -598,6 +650,11 @@ def use_locator(page, locator, locator_type, action, value=None):
                 try:
                     element_text = page.locator(formatted_locator).text_content()
                     if value and value.lower() in element_text.lower():
+                        value = js_safe(value)
+                        append_script_line(f"// {timestamp} validate text")
+                        append_script_line(
+                            f"await expect(page.locator('{formatted_locator}')).toContainText('{value}');"
+                        )
                         return True, None
                     else:
                         return False, f"Element found but does not contain expected text '{value}'"
@@ -614,6 +671,11 @@ def use_locator(page, locator, locator_type, action, value=None):
                 # Fallback: check page content
                 page_text = page.text_content()
                 if value.lower() in page_text.lower():
+                    value = js_safe(value)
+                    append_script_line(f"// {timestamp} validate page text")
+                    append_script_line(
+                        f"await expect(page.locator('body')).toContainText('{value}');"
+                    )
                     return True, None
                 else:
                     return False, f"Text '{value}' not found on page"
