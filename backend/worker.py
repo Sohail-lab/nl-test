@@ -556,36 +556,47 @@ def find_element_by_ai(page, step_description):
     return None, None, None
 
 
-SCRIPT_DIR = "playwright_script"
-SCRIPT_FILE = os.path.join(SCRIPT_DIR, "generatedTest.spec.js")
+SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "playwright_script")
+SCRIPT_FILE = None  # Set dynamically per test run
 
-def init_script():
-    """Create JS playwright script with boilerplate"""
+def init_script(test_name=None):
+    """Create JS playwright script with boilerplate. Uses unique timestamped filename."""
+    global SCRIPT_FILE
     os.makedirs(SCRIPT_DIR, exist_ok=True)
-
-    if not os.path.exists(SCRIPT_FILE):
+    
+    # Only create a new file if one hasn't been created yet for this run
+    if SCRIPT_FILE is None or not os.path.exists(SCRIPT_FILE):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', test_name or 'test')
+        filename = f"{safe_name}_{timestamp}.spec.js"
+        SCRIPT_FILE = os.path.join(SCRIPT_DIR, filename)
+        
+        display_name = test_name or 'Generated Test'
         with open(SCRIPT_FILE, "w", encoding="utf-8") as f:
-            f.write("""import { test, expect } from '@playwright/test';
+            f.write(f"""import {{ test, expect }} from '@playwright/test';
 
-            test('Generated Test', async ({ page }) => {
-
-            """)
+test('{js_safe(display_name)}', async ({{ page }}) => {{
+""")
+        print(f"[SCRIPT] Created new script: {filename}")
             
 def append_script_line(line):
-    with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
-        f.write(f"    {line}\n")
+    if SCRIPT_FILE:
+        with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
+            f.write(f"    {line}\n")
 
 def close_script():
-    with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
-        f.write("""
-        });
-        """)
+    global SCRIPT_FILE
+    if SCRIPT_FILE and os.path.exists(SCRIPT_FILE):
+        with open(SCRIPT_FILE, "a", encoding="utf-8") as f:
+            f.write("});") 
+        print(f"[SCRIPT] Closed script: {os.path.basename(SCRIPT_FILE)}")
+    SCRIPT_FILE = None  # Reset so next run creates a new file
 
 def js_safe(value):
-    """Escape quotes safely for JS"""
+    """Escape single quotes and backslashes for safe JS string embedding"""
     if value is None:
         return ""
-    return str(value).replace("'", "\\'")
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 def use_locator(page, locator, locator_type, action, value=None):
     """
@@ -613,7 +624,7 @@ def use_locator(page, locator, locator_type, action, value=None):
         if action == 'click':
             page.click(formatted_locator)
             append_script_line(f"// {timestamp} click")
-            append_script_line(f"await page.click('{formatted_locator}');")
+            append_script_line(f"await page.click('{js_safe(formatted_locator)}');")
             return True, None
         
         elif action in ('fill', 'type'):
@@ -621,7 +632,7 @@ def use_locator(page, locator, locator_type, action, value=None):
             page.fill(formatted_locator, str(value) if value else '')
             append_script_line(f"// {timestamp} fill")
             append_script_line(
-                f"await page.fill('{formatted_locator}', '{value}');"
+                f"await page.fill('{js_safe(formatted_locator)}', '{value}');"
             )
             return True, None
         
@@ -630,7 +641,7 @@ def use_locator(page, locator, locator_type, action, value=None):
             page.select_option(formatted_locator, str(value) if value else '')
             append_script_line(f"// {timestamp} select")
             append_script_line(
-                f"await page.selectOption('{formatted_locator}', '{value}');"
+                f"await page.selectOption('{js_safe(formatted_locator)}', '{value}');"
             )
             return True, None
         
@@ -639,33 +650,33 @@ def use_locator(page, locator, locator_type, action, value=None):
             page.press(formatted_locator, str(value) if value else 'Enter')
             append_script_line(f"// {timestamp} press")
             append_script_line(
-                f"await page.press('{formatted_locator}', '{value}');"
+                f"await page.press('{js_safe(formatted_locator)}', '{value}');"
             )
             return True, None
         
         elif action == 'hover':
             page.hover(formatted_locator)
             append_script_line(f"// {timestamp} hover")
-            append_script_line(f"await page.hover('{formatted_locator}');")
+            append_script_line(f"await page.hover('{js_safe(formatted_locator)}');")
             return True, None
         
         elif action == 'dblclick':
             page.dblclick(formatted_locator)
             append_script_line(f"// {timestamp} double click")
-            append_script_line(f"await page.dblclick('{formatted_locator}');")
+            append_script_line(f"await page.dblclick('{js_safe(formatted_locator)}');")
             return True, None
         
         elif action == 'rightclick':
             page.click(formatted_locator, button='right')
             append_script_line(f"// {timestamp} right click")
-            append_script_line(f"await page.click('{formatted_locator}', {{ button: 'right' }});")
+            append_script_line(f"await page.click('{js_safe(formatted_locator)}', {{ button: 'right' }});")
             return True, None
         
         elif action == 'scroll':
             # Scroll element into view
             page.locator(formatted_locator).scroll_into_view_if_needed()
             append_script_line(f"// {timestamp} scroll into view")
-            append_script_line(f"await page.locator('{formatted_locator}').scrollIntoViewIfNeeded();")
+            append_script_line(f"await page.locator('{js_safe(formatted_locator)}').scrollIntoViewIfNeeded();")
             return True, None
         
         elif action == 'validate':
@@ -678,7 +689,7 @@ def use_locator(page, locator, locator_type, action, value=None):
                         value = js_safe(value)
                         append_script_line(f"// {timestamp} validate text")
                         append_script_line(
-                            f"await expect(page.locator('{formatted_locator}')).toContainText('{value}');"
+                            f"await expect(page.locator('{js_safe(formatted_locator)}')).toContainText('{value}');"
                         )
                         return True, None
                     else:
@@ -990,6 +1001,9 @@ def execute_all_tests_with_playwright(test_cases, website_url, job_id):
                 page.close()
                 print(f"[BROWSER] Page closed")
             
+            # Close the playwright script
+            close_script()
+            
             # Close browser after all tests
             browser.close()
             print(f"\n[BROWSER] Browser closed")
@@ -1228,7 +1242,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     init_script()
                                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     append_script_line(f"// {timestamp} drag and drop")
-                                    append_script_line(f"await page.dragAndDrop('{src_fmt}', '{tgt_fmt}');")
+                                    append_script_line(f"await page.dragAndDrop('{js_safe(src_fmt)}', '{js_safe(tgt_fmt)}');")
                                     results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': True, 'source': src_locator, 'target': tgt_locator})
                                     print(f"[EXECUTE] SUCCESS: {description_for_exec}")
                                     wait_for_loader(page)
