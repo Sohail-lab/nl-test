@@ -643,6 +643,31 @@ def use_locator(page, locator, locator_type, action, value=None):
             )
             return True, None
         
+        elif action == 'hover':
+            page.hover(formatted_locator)
+            append_script_line(f"// {timestamp} hover")
+            append_script_line(f"await page.hover('{formatted_locator}');")
+            return True, None
+        
+        elif action == 'dblclick':
+            page.dblclick(formatted_locator)
+            append_script_line(f"// {timestamp} double click")
+            append_script_line(f"await page.dblclick('{formatted_locator}');")
+            return True, None
+        
+        elif action == 'rightclick':
+            page.click(formatted_locator, button='right')
+            append_script_line(f"// {timestamp} right click")
+            append_script_line(f"await page.click('{formatted_locator}', {{ button: 'right' }});")
+            return True, None
+        
+        elif action == 'scroll':
+            # Scroll element into view
+            page.locator(formatted_locator).scroll_into_view_if_needed()
+            append_script_line(f"// {timestamp} scroll into view")
+            append_script_line(f"await page.locator('{formatted_locator}').scrollIntoViewIfNeeded();")
+            return True, None
+        
         elif action == 'validate':
             # Validate that text exists on the page (using locator if provided, or page-wide search)
             # If locator is provided, check if the locator contains the text
@@ -701,7 +726,15 @@ def parse_natural_language_step(description):
     search_text = description  # Text to search for in the page DOM
     
     # Match action patterns (case-insensitive)
-    if re.search(r'\bclick\b', description, re.I):
+    if re.search(r'\bdouble\s*click\b', description, re.I) or re.search(r'\bdbl\s*click\b', description, re.I):
+        action = 'dblclick'
+        search_text = re.sub(r'\b(?:double|dbl)\s*click\s+(?:on|the)?\s*', '', description, flags=re.I).strip()
+    
+    elif re.search(r'\bright\s*click\b', description, re.I) or re.search(r'\bcontext\s*click\b', description, re.I):
+        action = 'rightclick'
+        search_text = re.sub(r'\b(?:right|context)\s*click\s+(?:on|the)?\s*', '', description, flags=re.I).strip()
+    
+    elif re.search(r'\bclick\b', description, re.I):
         action = 'click'
         # Remove action word for better matching
         search_text = re.sub(r'\bclick\s+(?:on|the)?\s*', '', description, flags=re.I).strip()
@@ -737,6 +770,43 @@ def parse_natural_language_step(description):
     elif re.search(r'\bscreenshot\b', description, re.I):
         action = 'screenshot'
     
+    elif re.search(r'\bscroll\b', description, re.I):
+        action = 'scroll'
+        # Check for direction
+        if re.search(r'\b(?:to\s+the\s+)?top\b', description, re.I):
+            value = 'top'
+        elif re.search(r'\b(?:to\s+the\s+)?bottom\b', description, re.I):
+            value = 'bottom'
+        elif re.search(r'\bup\b', description, re.I):
+            value = 'up'
+        else:
+            value = 'down'  # default direction
+        # Check for pixel amount
+        px_match = re.search(r'(\d+)\s*(?:pixels?|px)?', description, re.I)
+        if px_match and not re.search(r'\b(?:top|bottom)\b', description, re.I):
+            value = ('up' if re.search(r'\bup\b', description, re.I) else 'down') + ':' + px_match.group(1)
+        # Check for element target ("scroll to the X")
+        elem_match = re.search(r'scroll\s+(?:to|into\s+view(?:\s+of)?)\s+(?:the\s+)?(.+)', description, re.I)
+        if elem_match:
+            value = 'element'
+            search_text = elem_match.group(1).strip()
+        else:
+            search_text = ''
+    
+    elif re.search(r'\bhover\b', description, re.I) or re.search(r'\bmouse\s*over\b', description, re.I) or re.search(r'\bmove\s+mouse\s+to\b', description, re.I):
+        action = 'hover'
+        search_text = re.sub(r'\b(?:hover|mouse\s*over|move\s+mouse\s+to)\s+(?:over|on|the)?\s*', '', description, flags=re.I).strip()
+    
+    elif re.search(r'\bdrag\b', description, re.I):
+        action = 'drag'
+        # Extract source and target: "drag X to Y" or "drag X and drop on Y"
+        drag_match = re.search(r'drag\s+(?:the\s+)?(.+?)\s+(?:to|and\s+drop\s+(?:on|onto|to)?)\s+(?:the\s+)?(.+)', description, re.I)
+        if drag_match:
+            search_text = drag_match.group(1).strip()
+            value = drag_match.group(2).strip()  # target element description
+        else:
+            search_text = re.sub(r'\bdrag\s+(?:the)?\s*', '', description, flags=re.I).strip()
+    
     elif re.search(r'\bpress\b', description, re.I):
         action = 'press'
         key_match = re.search(r'\b(?:enter|return|escape|tab|backspace)\b', description, re.I)
@@ -763,6 +833,112 @@ def parse_natural_language_step(description):
         'search_text': search_text,
         'original': description
     }
+
+
+def decompose_step_with_ai(description):
+    """
+    Use AI to decompose a compound natural language step into atomic sub-steps.
+    Also resolves dynamic values like 'current date', 'today', 'current time', etc.
+    
+    Returns: list of step description strings
+    """
+    if not SECRET_KEY:
+        print("[DECOMPOSE] Skipped: SECRET_KEY not configured")
+        return [description]
+    
+    try:
+        print(f"[DECOMPOSE] Analyzing step: {description}")
+        
+        # Get current date/time for dynamic value resolution
+        now = datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+        current_date_slash = now.strftime("%m/%d/%Y")
+        current_time = now.strftime("%H:%M:%S")
+        current_datetime = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        prompt = (
+            "You are a test automation assistant. Your job is to take a natural language "
+            "test step and break it down into simple, atomic browser actions.\n\n"
+            "Rules:\n"
+            "1. Each atomic step should be ONE action: click, type/enter, select, hover, "
+            "scroll, double click, right click, drag, wait, press, validate, or screenshot.\n"
+            "2. For 'enter'/'type' actions, the user MUST click the field first before typing. "
+            "Always add a 'Click on [field]' step before any 'Enter' step unless a click is already specified.\n"
+            "3. Preserve quoted values EXACTLY as written.\n"
+            "4. Resolve dynamic values:\n"
+            f'   - "current date" or "today\'s date" or "today" -> "{current_date}" '
+            f'(or "{current_date_slash}" if a slash format seems expected)\n'
+            f'   - "current time" -> "{current_time}"\n'
+            f'   - "current date and time" or "now" -> "{current_datetime}"\n'
+            "5. If the step is already a single atomic action (e.g., 'Click login button'), "
+            "return it as-is in the array.\n"
+            "6. Each sub-step should be a clear, complete instruction that can be understood independently.\n"
+            "7. Be smart about field identification - if the user says 'enter email abc@gmail.com', "
+            "the field is the email field.\n\n"
+            "Examples:\n"
+            '- Input: "Enter email \\"admin@test.com\\" and password \\"pass123\\""\n'
+            '  Output: ["Click on email field", "Enter \\"admin@test.com\\" in email field", '
+            '"Click on password field", "Enter \\"pass123\\" in password field"]\n\n'
+            '- Input: "Enter current date in the date field"\n'
+            f'  Output: ["Click on date field", "Enter \\"{current_date}\\" in date field"]\n\n'
+            '- Input: "Double click on text and type \\"hello\\""\n'
+            '  Output: ["Double click on text field", "Enter \\"hello\\" in text field"]\n\n'
+            '- Input: "Click login button"\n'
+            '  Output: ["Click login button"]\n\n'
+            f'Now decompose this step:\n"{description}"\n\n'
+            "Return ONLY a JSON array of strings. No explanation, no markdown, just the JSON array."
+        )
+
+        payload = {
+            "model": "gpt-5-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        }
+        
+        req_data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            LLM_API_URL,
+            data=req_data,
+            headers={
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {SECRET_KEY}'
+            },
+            method='POST'
+        )
+        
+        with urllib.request.urlopen(req, timeout=20) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            
+            if result.get('choices') and len(result['choices']) > 0:
+                content = result['choices'][0]['message']['content'].strip()
+                print(f"[DECOMPOSE] LLM response: {content}")
+                
+                # Parse JSON from response (may be wrapped in markdown code blocks)
+                json_str = content
+                if '```json' in content:
+                    json_str = content.split('```json')[1].split('```')[0].strip()
+                elif '```' in content:
+                    json_str = content.split('```')[1].split('```')[0].strip()
+                
+                sub_steps = json.loads(json_str)
+                
+                if isinstance(sub_steps, list) and len(sub_steps) > 0:
+                    sub_steps = [s.strip() for s in sub_steps if isinstance(s, str) and s.strip()]
+                    if sub_steps:
+                        print(f"[DECOMPOSE] Decomposed into {len(sub_steps)} sub-steps: {sub_steps}")
+                        return sub_steps
+        
+        print(f"[DECOMPOSE] No decomposition needed, using original step")
+        return [description]
+        
+    except Exception as e:
+        print(f"[DECOMPOSE] Error: {str(e)[:100]}, using original step")
+        return [description]
 
 
 def execute_all_tests_with_playwright(test_cases, website_url, job_id):
@@ -920,170 +1096,268 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             description = val_str
                             break
             
-            # Write progress with current description
-            write_progress(job_id, results, idx, total_steps, description or '')
-            
-            # Parse natural language if no explicit action
+            # === AI STEP DECOMPOSITION ===
+            # Break compound steps into atomic sub-steps using AI
             if not raw_action and description:
-                parsed = parse_natural_language_step(description)
-                action = parsed.get('action')
-                value = parsed.get('value')
-                search_text = parsed.get('search_text', '')
-                print(f"[EXECUTE] Step: {description}")
-                print(f"[EXECUTE] Parsed action: {action}, value: {value}")
-            elif raw_action:
-                action = raw_action
-                value = step.get('value') if isinstance(step, dict) else None
-                search_text = description if description else ''
-                print(f"[EXECUTE] Step: {description if description else action}")
-                print(f"[EXECUTE] Action: {action}, value: {value}")
+                sub_steps = decompose_step_with_ai(description)
             else:
-                result_item = {'step': idx, 'description': description or '', 'action': '', 'ok': False, 'error': 'No action or description found'}
-                results.append(result_item)
-                print(f"[EXECUTE] FAILED: No action found - stopping execution")
-                break  # STOP ON FAILURE
+                sub_steps = [description or '']
             
-            # Handle different actions
-            action_failed = False
-            try:
-                if action in ('goto', 'navigate'):
-                    url = step.get('url') or website_url
-                    print(f"[EXECUTE] Navigating to: {url}")
-                    page.goto(url, timeout=30000)
-                    results.append({'step': idx, 'action': 'navigate', 'ok': True, 'url': url})
-                    print(f"[EXECUTE] SUCCESS: Navigated")
-                    import time
-                    time.sleep(1)  # Wait for page to load
-                    
-                elif action == 'wait':
-                    import time
-                    ms = int(value) if value else 2000
-                    print(f"[EXECUTE] Waiting {ms}ms")
-                    time.sleep(ms / 1000.0)
-                    results.append({'step': idx, 'action': 'wait', 'ok': True, 'ms': ms})
-                    print(f"[EXECUTE] SUCCESS: Wait completed")
-                    
-                elif action == 'screenshot':
-                    out = os.path.join(UPLOAD_DIR, f"{int(__import__('time').time())}-step{idx}-shot.png")
-                    page.screenshot(path=out)
-                    print(f"[EXECUTE] Screenshot saved: {out}")
-                    results.append({'step': idx, 'action': 'screenshot', 'ok': True, 'path': out})
-                    print(f"[EXECUTE] SUCCESS: Screenshot taken")
-                    
-                elif action in ('click', 'type', 'fill', 'select', 'press', 'validate'):
-                    # For ALL interactive actions, wait for loader first
-                    print(f"[EXECUTE] Action '{action}' - Waiting for page to be ready...")
-                    wait_for_loader(page)
-                    
-                    # Get DOM and send to LLM
-                    print(f"[EXECUTE] Capturing DOM...")
-                    dom = get_page_dom_simple(page)
-                    # Include data-testid summary for better element finding
-                    testid_summary = extract_data_testid_summary(page)
-                    dom = testid_summary + "\n" + dom if testid_summary else dom
-                    print(f"[EXECUTE] DOM captured, sending to LLM for locator...")
-                    
-                    if action == 'press':
-                        # Press action doesn't need LLM locator, but still gets DOM for context
-                        key = str(value) if value else 'Enter'
-                        print(f"[EXECUTE] Pressing key: {key}")
-                        page.press('body', key)
-                        results.append({'step': idx, 'action': 'press', 'ok': True, 'key': key})
-                        print(f"[EXECUTE] SUCCESS: Pressed key '{key}'")
-                    
-                    elif action == 'validate':
-                        # Validate action: check if text exists on page or in specific element
-                        print(f"[EXECUTE] Validating: {value}")
+            # Execute each sub-step (usually 1, but compound steps produce multiple)
+            step_failed = False
+            for sub_idx, sub_step_desc in enumerate(sub_steps):
+                if len(sub_steps) > 1:
+                    print(f"[EXECUTE]   --- Sub-step {sub_idx+1}/{len(sub_steps)}: {sub_step_desc} ---")
+                
+                # Write progress
+                progress_desc = f"{description} (sub-step {sub_idx+1}/{len(sub_steps)})" if len(sub_steps) > 1 else (description or '')
+                write_progress(job_id, results, idx, total_steps, progress_desc)
+                
+                # Use the sub-step description for parsing and execution
+                description_for_exec = sub_step_desc
+                
+                # Parse the (sub-)step
+                if not raw_action and sub_step_desc:
+                    parsed = parse_natural_language_step(sub_step_desc)
+                    action = parsed.get('action')
+                    value = parsed.get('value')
+                    search_text = parsed.get('search_text', '')
+                    print(f"[EXECUTE] Step: {sub_step_desc}")
+                    print(f"[EXECUTE] Parsed action: {action}, value: {value}")
+                elif raw_action:
+                    action = raw_action
+                    value = step.get('value') if isinstance(step, dict) else None
+                    search_text = description if description else ''
+                    description_for_exec = description
+                    print(f"[EXECUTE] Step: {description if description else action}")
+                    print(f"[EXECUTE] Action: {action}, value: {value}")
+                else:
+                    result_item = {'step': idx, 'description': description or '', 'action': '', 'ok': False, 'error': 'No action or description found'}
+                    results.append(result_item)
+                    print(f"[EXECUTE] FAILED: No action found - stopping execution")
+                    step_failed = True
+                    break
+                
+                # Handle different actions
+                action_failed = False
+                try:
+                    if action in ('goto', 'navigate'):
+                        url = step.get('url') or website_url
+                        print(f"[EXECUTE] Navigating to: {url}")
+                        page.goto(url, timeout=30000)
+                        results.append({'step': idx, 'action': 'navigate', 'ok': True, 'url': url})
+                        print(f"[EXECUTE] SUCCESS: Navigated")
+                        import time
+                        time.sleep(1)  # Wait for page to load
                         
-                        # Check if text appears anywhere on page
-                        try:
-                            page_text = page.locator('body').text_content()
-                            if value.lower() in page_text.lower():
-                                results.append({
-                                    'step': idx, 
-                                    'description': description,
-                                    'action': 'validate', 
-                                    'ok': True, 
-                                    'validated_text': value
-                                })
-                                print(f"[EXECUTE] SUCCESS: {description}")
-                            else:
-                                error_msg = f'Validation failed: Text "{value}" not found on page'
-                                print(f"[EXECUTE] FAILED: {description} - {error_msg}")
-                                results.append({'step': idx, 'description': description, 'action': 'validate', 'ok': False, 'error': error_msg})
-                                action_failed = True
-                        except Exception as e:
-                            error_msg = f'Validation error: {str(e)[:100]}'
-                            print(f"[EXECUTE] FAILED: {description} - {error_msg}")
-                            results.append({'step': idx, 'description': description, 'action': 'validate', 'ok': False, 'error': error_msg})
-                            action_failed = True
-                    
-                    else:
-                        # Send DOM to LLM to get locator for interactive actions
-                        locator, locator_type = get_locator_from_ai(dom, description or search_text)
+                    elif action == 'wait':
+                        import time
+                        ms = int(value) if value else 2000
+                        print(f"[EXECUTE] Waiting {ms}ms")
+                        time.sleep(ms / 1000.0)
+                        results.append({'step': idx, 'action': 'wait', 'ok': True, 'ms': ms})
+                        print(f"[EXECUTE] SUCCESS: Wait completed")
                         
-                        if not locator:
-                            error_msg = f'LLM could not find locator for: "{description or search_text}"'
-                            print(f"[EXECUTE] FAILED: {description} - {error_msg}")
-                            results.append({'step': idx, 'description': description, 'action': action, 'ok': False, 'error': error_msg})
+                    elif action == 'screenshot':
+                        out = os.path.join(UPLOAD_DIR, f"{int(__import__('time').time())}-step{idx}-shot.png")
+                        page.screenshot(path=out)
+                        print(f"[EXECUTE] Screenshot saved: {out}")
+                        results.append({'step': idx, 'action': 'screenshot', 'ok': True, 'path': out})
+                        print(f"[EXECUTE] SUCCESS: Screenshot taken")
+                        
+                    elif action == 'scroll' and value != 'element':
+                        # Standalone scroll (no element target) — no locator needed
+                        import time
+                        print(f"[EXECUTE] Scrolling: {value}")
+                        if value == 'top':
+                            page.evaluate("window.scrollTo(0, 0)")
+                        elif value == 'bottom':
+                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        else:
+                            # Parse direction and optional pixel amount
+                            direction = 'down'
+                            pixels = 300  # default
+                            if ':' in str(value):
+                                parts = str(value).split(':')
+                                direction = parts[0]
+                                pixels = int(parts[1])
+                            elif value == 'up':
+                                direction = 'up'
+                            
+                            scroll_amount = -pixels if direction == 'up' else pixels
+                            page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+                        
+                        time.sleep(0.3)  # let the scroll settle
+                        results.append({'step': idx, 'description': description_for_exec, 'action': 'scroll', 'ok': True, 'value': str(value)})
+                        print(f"[EXECUTE] SUCCESS: Scroll {value}")
+                    
+                    elif action == 'drag':
+                        # Drag and drop needs TWO locators: source and target
+                        print(f"[EXECUTE] Action 'drag' - Waiting for page to be ready...")
+                        wait_for_loader(page)
+                        print(f"[EXECUTE] Capturing DOM...")
+                        dom = get_page_dom_simple(page)
+                        testid_summary = extract_data_testid_summary(page)
+                        dom = testid_summary + "\n" + dom if testid_summary else dom
+                        
+                        # Find source element
+                        source_desc = search_text
+                        print(f"[EXECUTE] Finding drag source: {source_desc}")
+                        src_locator, src_type = get_locator_from_ai(dom, f"Find the element to drag: {source_desc}")
+                        if not src_locator:
+                            error_msg = f'Could not find drag source: "{source_desc}"'
+                            print(f"[EXECUTE] FAILED: {error_msg}")
+                            results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': False, 'error': error_msg})
                             action_failed = True
                         else:
-                            # Got locator from LLM, now perform the action
-                            print(f"[EXECUTE] Got locator: {locator} (type: {locator_type})")
-                            print(f"[EXECUTE] Performing action: {action}...")
-                            
-                            success, error = use_locator(page, locator, locator_type, action, value)
-                            
-                            if success:
-                                # After click/interactive action, wait for any loaders
-                                if action == 'click':
-                                    print(f"[EXECUTE] Click executed, waiting for page to settle...")
-                                    wait_for_loader(page)
-                                
-                                results.append({
-                                    'step': idx, 
-                                    'description': description,
-                                    'action': action, 
-                                    'ok': True, 
-                                    'locator': locator, 
-                                    'type': locator_type,
-                                    'value': str(value)[:50] if value else None
-                                })
-                                print(f"[EXECUTE] SUCCESS: {description}")
-                                
-                                # Get new DOM after action (for next step to see updated page)
-                                print(f"[EXECUTE] Getting DOM after action...")
-                            else:
-                                results.append({
-                                    'step': idx, 
-                                    'description': description,
-                                    'action': action, 
-                                    'ok': False, 
-                                    'error': error,
-                                    'locator': locator,
-                                    'type': locator_type
-                                })
-                                print(f"[EXECUTE] FAILED: {description} - {error}")
+                            # Find target element
+                            target_desc = value
+                            print(f"[EXECUTE] Finding drop target: {target_desc}")
+                            tgt_locator, tgt_type = get_locator_from_ai(dom, f"Find the drop target element: {target_desc}")
+                            if not tgt_locator:
+                                error_msg = f'Could not find drop target: "{target_desc}"'
+                                print(f"[EXECUTE] FAILED: {error_msg}")
+                                results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': False, 'error': error_msg})
                                 action_failed = True
-                
-                else:
-                    result_item = {'step': idx, 'description': description, 'action': action, 'ok': False, 'error': f'Unknown action: {action}'}
-                    results.append(result_item)
-                    print(f"[EXECUTE] FAILED: Unknown action: {action}")
+                            else:
+                                try:
+                                    src_fmt = f'xpath={src_locator}' if src_type == 'xpath' else src_locator
+                                    tgt_fmt = f'xpath={tgt_locator}' if tgt_type == 'xpath' else tgt_locator
+                                    print(f"[EXECUTE] Dragging {src_fmt} -> {tgt_fmt}")
+                                    page.drag_and_drop(src_fmt, tgt_fmt)
+                                    init_script()
+                                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    append_script_line(f"// {timestamp} drag and drop")
+                                    append_script_line(f"await page.dragAndDrop('{src_fmt}', '{tgt_fmt}');")
+                                    results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': True, 'source': src_locator, 'target': tgt_locator})
+                                    print(f"[EXECUTE] SUCCESS: {description_for_exec}")
+                                    wait_for_loader(page)
+                                except Exception as e:
+                                    error_msg = str(e)[:150]
+                                    print(f"[EXECUTE] FAILED: Drag and drop - {error_msg}")
+                                    results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': False, 'error': error_msg})
+                                    action_failed = True
+                    
+                    elif action in ('click', 'type', 'fill', 'select', 'press', 'validate', 'hover', 'dblclick', 'rightclick') or (action == 'scroll' and value == 'element'):
+                        # For ALL interactive actions, wait for loader first
+                        print(f"[EXECUTE] Action '{action}' - Waiting for page to be ready...")
+                        wait_for_loader(page)
+                        
+                        # Get DOM and send to LLM
+                        print(f"[EXECUTE] Capturing DOM...")
+                        dom = get_page_dom_simple(page)
+                        # Include data-testid summary for better element finding
+                        testid_summary = extract_data_testid_summary(page)
+                        dom = testid_summary + "\n" + dom if testid_summary else dom
+                        print(f"[EXECUTE] DOM captured, sending to LLM for locator...")
+                        
+                        if action == 'press':
+                            # Press action doesn't need LLM locator, but still gets DOM for context
+                            key = str(value) if value else 'Enter'
+                            print(f"[EXECUTE] Pressing key: {key}")
+                            page.press('body', key)
+                            results.append({'step': idx, 'action': 'press', 'ok': True, 'key': key})
+                            print(f"[EXECUTE] SUCCESS: Pressed key '{key}'")
+                        
+                        elif action == 'validate':
+                            # Validate action: check if text exists on page or in specific element
+                            print(f"[EXECUTE] Validating: {value}")
+                            
+                            # Check if text appears anywhere on page
+                            try:
+                                page_text = page.locator('body').text_content()
+                                if value.lower() in page_text.lower():
+                                    results.append({
+                                        'step': idx, 
+                                        'description': description_for_exec,
+                                        'action': 'validate', 
+                                        'ok': True, 
+                                        'validated_text': value
+                                    })
+                                    print(f"[EXECUTE] SUCCESS: {description_for_exec}")
+                                else:
+                                    error_msg = f'Validation failed: Text "{value}" not found on page'
+                                    print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
+                                    results.append({'step': idx, 'description': description_for_exec, 'action': 'validate', 'ok': False, 'error': error_msg})
+                                    action_failed = True
+                            except Exception as e:
+                                error_msg = f'Validation error: {str(e)[:100]}'
+                                print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
+                                results.append({'step': idx, 'description': description_for_exec, 'action': 'validate', 'ok': False, 'error': error_msg})
+                                action_failed = True
+                        
+                        else:
+                            # Send DOM to LLM to get locator for interactive actions
+                            locator, locator_type = get_locator_from_ai(dom, description_for_exec or search_text)
+                            
+                            if not locator:
+                                error_msg = f'LLM could not find locator for: "{description_for_exec or search_text}"'
+                                print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
+                                results.append({'step': idx, 'description': description_for_exec, 'action': action, 'ok': False, 'error': error_msg})
+                                action_failed = True
+                            else:
+                                # Got locator from LLM, now perform the action
+                                print(f"[EXECUTE] Got locator: {locator} (type: {locator_type})")
+                                print(f"[EXECUTE] Performing action: {action}...")
+                                
+                                success, error = use_locator(page, locator, locator_type, action, value)
+                                
+                                if success:
+                                    # After click/interactive action, wait for any loaders
+                                    if action in ('click', 'hover', 'dblclick', 'rightclick'):
+                                        print(f"[EXECUTE] {action.title()} executed, waiting for page to settle...")
+                                        wait_for_loader(page)
+                                    
+                                    results.append({
+                                        'step': idx, 
+                                        'description': description_for_exec,
+                                        'action': action, 
+                                        'ok': True, 
+                                        'locator': locator, 
+                                        'type': locator_type,
+                                        'value': str(value)[:50] if value else None
+                                    })
+                                    print(f"[EXECUTE] SUCCESS: {description_for_exec}")
+                                    
+                                    # Get new DOM after action (for next step to see updated page)
+                                    print(f"[EXECUTE] Getting DOM after action...")
+                                else:
+                                    results.append({
+                                        'step': idx, 
+                                        'description': description_for_exec,
+                                        'action': action, 
+                                        'ok': False, 
+                                        'error': error,
+                                        'locator': locator,
+                                        'type': locator_type
+                                    })
+                                    print(f"[EXECUTE] FAILED: {description_for_exec} - {error}")
+                                    action_failed = True
+                    
+                    else:
+                        result_item = {'step': idx, 'description': description_for_exec, 'action': action, 'ok': False, 'error': f'Unknown action: {action}'}
+                        results.append(result_item)
+                        print(f"[EXECUTE] FAILED: Unknown action: {action}")
+                        action_failed = True
+                    
+                    # Delay between steps
+                    import time
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    error_msg = str(e)[:200]
+                    print(f"[EXECUTE] EXCEPTION: {error_msg}")
+                    results.append({'step': idx, 'description': description_for_exec if 'description_for_exec' in locals() else '', 'action': action if 'action' in locals() else '', 'ok': False, 'error': error_msg})
                     action_failed = True
                 
-                # Delay between steps
-                import time
-                time.sleep(0.5)
-                
-            except Exception as e:
-                error_msg = str(e)[:200]
-                print(f"[EXECUTE] EXCEPTION: {error_msg}")
-                results.append({'step': idx, 'description': description if 'description' in locals() else '', 'action': action if 'action' in locals() else '', 'ok': False, 'error': error_msg})
-                action_failed = True
+                # STOP SUB-STEP EXECUTION IF FAILED
+                if action_failed:
+                    print(f"[EXECUTE] Sub-step failed - stopping execution")
+                    step_failed = True
+                    break
             
             # STOP EXECUTION IF STEP FAILED
-            if action_failed:
+            if step_failed:
                 print(f"[EXECUTE] Step {idx} failed - stopping execution")
                 break
         
