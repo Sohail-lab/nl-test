@@ -558,6 +558,7 @@ def find_element_by_ai(page, step_description):
 
 SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "playwright_script")
 SCRIPT_FILE = None  # Set dynamically per test run
+SCRIPT_URL = None   # Set by execute_single_test so init_script can add goto
 
 def init_script(test_name=None):
     """Create JS playwright script with boilerplate. Uses unique timestamped filename."""
@@ -572,10 +573,14 @@ def init_script(test_name=None):
         SCRIPT_FILE = os.path.join(SCRIPT_DIR, filename)
         
         display_name = test_name or 'Generated Test'
+        goto_line = ""
+        if SCRIPT_URL:
+            goto_line = f"    await page.goto(`{js_safe(SCRIPT_URL)}`);"
         with open(SCRIPT_FILE, "w", encoding="utf-8") as f:
             f.write(f"""import {{ test, expect }} from '@playwright/test';
 
-test('{js_safe(display_name)}', async ({{ page }}) => {{
+test('{display_name}', async ({{ page }}) => {{
+{goto_line}
 """)
         print(f"[SCRIPT] Created new script: {filename}")
             
@@ -593,10 +598,10 @@ def close_script():
     SCRIPT_FILE = None  # Reset so next run creates a new file
 
 def js_safe(value):
-    """Escape single quotes and backslashes for safe JS string embedding"""
+    """Escape backticks and template expressions for safe JS template literal embedding"""
     if value is None:
         return ""
-    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return str(value).replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
 def use_locator(page, locator, locator_type, action, value=None):
     """
@@ -624,59 +629,54 @@ def use_locator(page, locator, locator_type, action, value=None):
         if action == 'click':
             page.click(formatted_locator)
             append_script_line(f"// {timestamp} click")
-            append_script_line(f"await page.click('{js_safe(formatted_locator)}');")
+            append_script_line(f"await page.click(`{js_safe(formatted_locator)}`);")
             return True, None
         
         elif action in ('fill', 'type'):
-            value = js_safe(value)
             page.fill(formatted_locator, str(value) if value else '')
             append_script_line(f"// {timestamp} fill")
             append_script_line(
-                f"await page.fill('{js_safe(formatted_locator)}', '{value}');"
-            )
+                f"await page.fill(`{js_safe(formatted_locator)}`, `{js_safe(value)}`);")
             return True, None
         
         elif action == 'select':
-            value = js_safe(value)
             page.select_option(formatted_locator, str(value) if value else '')
             append_script_line(f"// {timestamp} select")
             append_script_line(
-                f"await page.selectOption('{js_safe(formatted_locator)}', '{value}');"
-            )
+                f"await page.selectOption(`{js_safe(formatted_locator)}`, `{js_safe(value)}`);")
             return True, None
         
         elif action == 'press':
-            value = js_safe(value if value else "Enter")
-            page.press(formatted_locator, str(value) if value else 'Enter')
+            press_key = str(value) if value else 'Enter'
+            page.press(formatted_locator, press_key)
             append_script_line(f"// {timestamp} press")
             append_script_line(
-                f"await page.press('{js_safe(formatted_locator)}', '{value}');"
-            )
+                f"await page.press(`{js_safe(formatted_locator)}`, `{js_safe(press_key)}`);")
             return True, None
         
         elif action == 'hover':
             page.hover(formatted_locator)
             append_script_line(f"// {timestamp} hover")
-            append_script_line(f"await page.hover('{js_safe(formatted_locator)}');")
+            append_script_line(f"await page.hover(`{js_safe(formatted_locator)}`);")
             return True, None
         
         elif action == 'dblclick':
             page.dblclick(formatted_locator)
             append_script_line(f"// {timestamp} double click")
-            append_script_line(f"await page.dblclick('{js_safe(formatted_locator)}');")
+            append_script_line(f"await page.dblclick(`{js_safe(formatted_locator)}`);")
             return True, None
         
         elif action == 'rightclick':
             page.click(formatted_locator, button='right')
             append_script_line(f"// {timestamp} right click")
-            append_script_line(f"await page.click('{js_safe(formatted_locator)}', {{ button: 'right' }});")
+            append_script_line(f"await page.click(`{js_safe(formatted_locator)}`, {{ button: 'right' }});")
             return True, None
         
         elif action == 'scroll':
             # Scroll element into view
             page.locator(formatted_locator).scroll_into_view_if_needed()
             append_script_line(f"// {timestamp} scroll into view")
-            append_script_line(f"await page.locator('{js_safe(formatted_locator)}').scrollIntoViewIfNeeded();")
+            append_script_line(f"await page.locator(`{js_safe(formatted_locator)}`).scrollIntoViewIfNeeded();")
             return True, None
         
         elif action == 'validate':
@@ -686,11 +686,9 @@ def use_locator(page, locator, locator_type, action, value=None):
                 try:
                     element_text = page.locator(formatted_locator).text_content()
                     if value and value.lower() in element_text.lower():
-                        value = js_safe(value)
                         append_script_line(f"// {timestamp} validate text")
                         append_script_line(
-                            f"await expect(page.locator('{js_safe(formatted_locator)}')).toContainText('{value}');"
-                        )
+                            f"await expect(page.locator(`{js_safe(formatted_locator)}`)).toContainText(`{js_safe(value)}`);")
                         return True, None
                     else:
                         return False, f"Element found but does not contain expected text '{value}'"
@@ -707,11 +705,9 @@ def use_locator(page, locator, locator_type, action, value=None):
                 # Fallback: check page content
                 page_text = page.text_content()
                 if value.lower() in page_text.lower():
-                    value = js_safe(value)
                     append_script_line(f"// {timestamp} validate page text")
                     append_script_line(
-                        f"await expect(page.locator('body')).toContainText('{value}');"
-                    )
+                        f"await expect(page.locator(`body`)).toContainText(`{js_safe(value)}`);")
                     return True, None
                 else:
                     return False, f"Text '{value}' not found on page"
@@ -873,8 +869,10 @@ def decompose_step_with_ai(description):
             "Rules:\n"
             "1. Each atomic step should be ONE action: click, type/enter, select, hover, "
             "scroll, double click, right click, drag, wait, press, validate, or screenshot.\n"
-            "2. For 'enter'/'type' actions, the user MUST click the field first before typing. "
-            "Always add a 'Click on [field]' step before any 'Enter' step unless a click is already specified.\n"
+            "2. ALWAYS CLICK BEFORE TYPING: Whenever ANY step involves entering/typing a value into a field, "
+            "you MUST ALWAYS add a 'Click on [field]' step BEFORE the 'Enter' step. This applies even if "
+            "the user only says 'Enter X' without mentioning a click. You must infer the target field from "
+            "context and click it first. There are NO exceptions to this rule.\n"
             "3. Preserve quoted values EXACTLY as written.\n"
             "4. Resolve dynamic values:\n"
             f'   - "current date" or "today\'s date" or "today" -> "{current_date}" '
@@ -885,7 +883,59 @@ def decompose_step_with_ai(description):
             "return it as-is in the array.\n"
             "6. Each sub-step should be a clear, complete instruction that can be understood independently.\n"
             "7. Be smart about field identification - if the user says 'enter email abc@gmail.com', "
-            "the field is the email field.\n\n"
+            "the field is the email field.\n"
+            "8. DROPDOWN / SELECT INTERACTIONS: Selecting a value from a dropdown is a MULTI-STEP process. "
+            "You must: (a) Click on the dropdown element to open it, (b) Add a short 'Wait 1 second' step "
+            "for the dropdown options to appear, (c) Click on the specific option text. "
+            "Do NOT use a bare 'select' action unless the element is a native HTML <select>. "
+            "Most custom dropdowns (Material UI, Ant Design, PrimeNG, etc.) need click-wait-click.\n"
+            "9. NTH ELEMENT / ORDINAL SELECTION: When the user references an ordinal like "
+            "'second', 'third', '2nd', '3rd', etc., ALWAYS preserve the ordinal in the sub-step. "
+            "E.g., 'Click the second Delete button' should stay as 'Click the second Delete button', "
+            "NOT 'Click Delete button'.\n"
+            "10. CHECKBOX / RADIO / TOGGLE: If the user says 'check', 'uncheck', 'toggle', or 'select' "
+            "a checkbox or radio button, decompose as a click on that specific element.\n"
+            "11. CLEAR THEN TYPE: If the user says 'clear and type', 'replace with', or 'change to', "
+            "decompose as: (a) Click on the field, (b) Clear the field (output 'Clear the [field]'), "
+            "(c) Enter the new value.\n"
+            "12. KEYBOARD NAVIGATION: If the user mentions pressing Tab, Escape, Arrow keys, etc., "
+            "output 'Press [Key]' as a separate atomic step.\n"
+            "13. MULTI-FIELD FORMS: For steps like 'fill out the form with X, Y, Z', decompose "
+            "into separate click + enter pairs for EACH field.\n"
+            "14. CONFIRMATION DIALOGS / ALERTS: If the user says 'click X and confirm', decompose "
+            "into: (a) Click the button, (b) Wait 1 second, (c) Click the confirm/OK/Yes button.\n"
+            "15. AUTOCOMPLETE / SEARCH-SELECT: If the user says 'search and select X' or 'type X in "
+            "the search dropdown and select it', decompose as: (a) Click on the search/input field, "
+            "(b) Enter the search text, (c) Wait 1 second for results, (d) Click on the matching option.\n"
+            "16. MULTIPLE SAME-NAMED ELEMENTS: If the user says something like 'click the Save button "
+            "in the modal' or 'click the Submit button at the bottom', preserve the location/context qualifier "
+            "in the sub-step so the locator AI can differentiate between multiple matching elements.\n"
+            "17. FILE UPLOAD: If the user says 'upload file' or 'attach file', decompose as a click on "
+            "the file input / upload button. The actual file selection is handled separately.\n"
+            "18. FLEXIBLE PHRASING - PREPOSITIONS: Users write steps in many informal ways. "
+            "ALL of these patterns mean the same thing and you MUST handle them identically:\n"
+            "   - 'Select X from Y' / 'Select X in Y' / 'Select X as Y' / 'Select X Y' / 'Choose X Y' / 'Pick X Y'\n"
+            "   - 'Enter X in Y' / 'Enter X into Y' / 'Type X in Y' / 'Put X in Y' / 'Write X in Y' / 'Enter X Y'\n"
+            "   - 'Click X' / 'Click on X' / 'Press X' / 'Hit X' / 'Tap X'\n"
+            "   - 'Check X' / 'Tick X' / 'Mark X' / 'Enable X' / 'Turn on X'\n"
+            "   - 'Go to X' / 'Open X' / 'Navigate to X' / 'Visit X'\n"
+            "   Regardless of which preposition or verb is used, understand the user's INTENT and decompose correctly.\n"
+            "19. FLEXIBLE PHRASING - ACTION VERBS: Map informal verbs to correct browser actions:\n"
+            "   - 'pick', 'choose', 'select' + field name -> dropdown interaction (click-wait-click)\n"
+            "   - 'put', 'write', 'fill', 'input' -> type/enter into a text field\n"
+            "   - 'hit', 'tap', 'press', 'push' a button -> click\n"
+            "   - 'tick', 'mark', 'enable', 'turn on' -> click on a checkbox\n"
+            "   - 'untick', 'unmark', 'disable', 'turn off' -> click on a checkbox to uncheck\n"
+            "   - 'go to', 'open', 'visit', 'navigate to' -> navigate\n"
+            "   - 'look for', 'find', 'search for', 'search' -> type in a search field\n"
+            "20. INFER ELEMENT TYPE FROM CONTEXT: When the user doesn't explicitly say 'dropdown', 'field', "
+            "'button', etc., INFER the element type from clues:\n"
+            "   - 'Select X instance' / 'Select X in instance' -> 'instance' is most likely a dropdown\n"
+            "   - 'Enter X username' / 'Type X in username' -> 'username' is most likely a text field\n"
+            "   - 'Click submit' / 'Hit save' -> 'submit'/'save' are most likely buttons\n"
+            "   - 'Check terms' / 'Tick agree' -> most likely checkboxes\n"
+            "   Any field name the user mentions (instance, country, gender, role, status, category, priority, "
+            "   department, etc.) should be treated as the element's label/name on the page.\n\n"
             "Examples:\n"
             '- Input: "Enter email \\"admin@test.com\\" and password \\"pass123\\""\n'
             '  Output: ["Click on email field", "Enter \\"admin@test.com\\" in email field", '
@@ -896,6 +946,51 @@ def decompose_step_with_ai(description):
             '  Output: ["Double click on text field", "Enter \\"hello\\" in text field"]\n\n'
             '- Input: "Click login button"\n'
             '  Output: ["Click login button"]\n\n'
+            '- Input: "Select \\"India\\" from the Country dropdown"\n'
+            '  Output: ["Click on the Country dropdown", "Wait 1 second", "Click on \\"India\\" option"]\n\n'
+            '- Input: "Select \\"Male\\" from Gender dropdown and \\"India\\" from Country dropdown"\n'
+            '  Output: ["Click on the Gender dropdown", "Wait 1 second", "Click on \\"Male\\" option", '
+            '"Click on the Country dropdown", "Wait 1 second", "Click on \\"India\\" option"]\n\n'
+            '- Input: "Click the second Delete button"\n'
+            '  Output: ["Click the second Delete button"]\n\n'
+            '- Input: "Check the Remember me checkbox"\n'
+            '  Output: ["Click on the Remember me checkbox"]\n\n'
+            '- Input: "Clear the search field and type \\"new query\\""\n'
+            '  Output: ["Click on the search field", "Clear the search field", '
+            '"Enter \\"new query\\" in the search field"]\n\n'
+            '- Input: "Click Save and confirm the dialog"\n'
+            '  Output: ["Click Save button", "Wait 1 second", "Click the confirm button in the dialog"]\n\n'
+            '- Input: "Search for \\"React\\" in the skills dropdown and select it"\n'
+            '  Output: ["Click on the skills dropdown", "Enter \\"React\\" in the skills search field", '
+            '"Wait 1 second", "Click on \\"React\\" option"]\n\n'
+            '- Input: "Select abcd instance"\n'
+            '  Output: ["Click on the instance dropdown", "Wait 1 second", "Click on \\"abcd\\" option"]\n\n'
+            '- Input: "Select abcd as instance"\n'
+            '  Output: ["Click on the instance dropdown", "Wait 1 second", "Click on \\"abcd\\" option"]\n\n'
+            '- Input: "Select abcd in instance"\n'
+            '  Output: ["Click on the instance dropdown", "Wait 1 second", "Click on \\"abcd\\" option"]\n\n'
+            '- Input: "Choose \\"Admin\\" role"\n'
+            '  Output: ["Click on the role dropdown", "Wait 1 second", "Click on \\"Admin\\" option"]\n\n'
+            '- Input: "Pick High priority"\n'
+            '  Output: ["Click on the priority dropdown", "Wait 1 second", "Click on \\"High\\" option"]\n\n'
+            '- Input: "Put \\"john@test.com\\" in email"\n'
+            '  Output: ["Click on the email field", "Enter \\"john@test.com\\" in email field"]\n\n'
+            '- Input: "Write \\"Hello World\\" in description"\n'
+            '  Output: ["Click on the description field", "Enter \\"Hello World\\" in description field"]\n\n'
+            '- Input: "Hit the submit button"\n'
+            '  Output: ["Click the submit button"]\n\n'
+            '- Input: "Tick the agree to terms checkbox"\n'
+            '  Output: ["Click on the agree to terms checkbox"]\n\n'
+            '- Input: "Go to settings page"\n'
+            '  Output: ["Click on settings page"]\n\n'
+            '- Input: "Enter \\"admin@test.com\\""\n'
+            '  Output: ["Click on the email field", "Enter \\"admin@test.com\\" in the email field"]\n\n'
+            '- Input: "Enter \\"admin@test.com\\" email"\n'
+            '  Output: ["Click on email field", "Enter \\"admin@test.com\\" in email field"]\n\n'
+            '- Input: "Type \\"john\\" username"\n'
+            '  Output: ["Click on username field", "Enter \\"john\\" in username field"]\n\n'
+            '- Input: "Enter \\"pass123\\" in the password field"\n'
+            '  Output: ["Click on the password field", "Enter \\"pass123\\" in the password field"]\n\n'
             f'Now decompose this step:\n"{description}"\n\n'
             "Return ONLY a JSON array of strings. No explanation, no markdown, just the JSON array."
         )
@@ -1065,6 +1160,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
             print(f"[BROWSER] Reusing existing page from previous test")
         
         # Navigate to the website
+        global SCRIPT_URL
+        SCRIPT_URL = website_url
         try:
             page.goto(website_url, timeout=30000)
             print(f"[EXECUTE] Navigated to {website_url}")
@@ -1242,7 +1339,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     init_script()
                                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     append_script_line(f"// {timestamp} drag and drop")
-                                    append_script_line(f"await page.dragAndDrop('{js_safe(src_fmt)}', '{js_safe(tgt_fmt)}');")
+                                    append_script_line(f"await page.dragAndDrop(`{js_safe(src_fmt)}`, `{js_safe(tgt_fmt)}`);")
                                     results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': True, 'source': src_locator, 'target': tgt_locator})
                                     print(f"[EXECUTE] SUCCESS: {description_for_exec}")
                                     wait_for_loader(page)
