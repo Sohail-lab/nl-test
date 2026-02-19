@@ -603,7 +603,7 @@ def js_safe(value):
         return ""
     return str(value).replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
-def use_locator(page, locator, locator_type, action, value=None):
+def use_locator(page, locator, locator_type, action, value=None, step_description=None):
     """
     Execute an action using the locator, handling both CSS selectors and XPath.
     Args:
@@ -612,6 +612,7 @@ def use_locator(page, locator, locator_type, action, value=None):
         locator_type: 'css' or 'xpath'
         action: 'click', 'fill', 'select', 'press'
         value: Value for fill/select actions
+        step_description: Natural language description of what this step does (for AI healing)
     Returns:
         (success: bool, error: str or None)
     """
@@ -625,6 +626,10 @@ def use_locator(page, locator, locator_type, action, value=None):
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[Locator] Using {locator_type}: {locator}")
+        
+        # Write step description comment for AI healing context
+        if step_description:
+            append_script_line(f"// step: {step_description}")
         
         if action == 'click':
             page.click(formatted_locator)
@@ -1338,6 +1343,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     page.drag_and_drop(src_fmt, tgt_fmt)
                                     init_script()
                                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    if description_for_exec:
+                                        append_script_line(f"// step: {description_for_exec}")
                                     append_script_line(f"// {timestamp} drag and drop")
                                     append_script_line(f"await page.dragAndDrop(`{js_safe(src_fmt)}`, `{js_safe(tgt_fmt)}`);")
                                     results.append({'step': idx, 'description': description_for_exec, 'action': 'drag', 'ok': True, 'source': src_locator, 'target': tgt_locator})
@@ -1411,7 +1418,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 print(f"[EXECUTE] Got locator: {locator} (type: {locator_type})")
                                 print(f"[EXECUTE] Performing action: {action}...")
                                 
-                                success, error = use_locator(page, locator, locator_type, action, value)
+                                success, error = use_locator(page, locator, locator_type, action, value, step_description=description_for_exec)
                                 
                                 if success:
                                     # After click/interactive action, wait for any loaders

@@ -64,6 +64,7 @@ def parse_spec_file(file_path):
     goto_url = None
     actions = []
     pending_comment = None
+    pending_step_desc = None
 
     # Regex to pull the string content from either 'xxx' or `xxx`
     # We capture the delimiter to know which format we're in
@@ -74,7 +75,12 @@ def parse_spec_file(file_path):
 
         # Capture comments as step descriptions
         if stripped.startswith("//"):
-            pending_comment = stripped.lstrip("/").strip()
+            comment_text = stripped.lstrip("/").strip()
+            # Check for step description comment (// step: ...)
+            if comment_text.startswith("step:"):
+                pending_step_desc = comment_text[len("step:"):].strip()
+            else:
+                pending_comment = comment_text
             continue
 
         # ── page.goto ──
@@ -82,6 +88,7 @@ def parse_spec_file(file_path):
         if m:
             goto_url = m.group(1) if m.group(1) is not None else m.group(2)
             pending_comment = None
+            pending_step_desc = None
             continue
 
         # ── page.click / page.dblclick / page.hover ──
@@ -92,8 +99,9 @@ def parse_spec_file(file_path):
             )
             if m:
                 locator = m.group(1) if m.group(1) is not None else m.group(2)
-                actions.append(_action(idx, pending_comment, raw_line, action_name, locator))
+                actions.append(_action(idx, pending_comment, raw_line, action_name, locator, step_description=pending_step_desc))
                 pending_comment = None
+                pending_step_desc = None
                 break
         else:
             # ── page.fill / page.selectOption / page.press  (two-arg) ──
@@ -105,8 +113,9 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, action_name, locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, action_name, locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     break
             else:
                 # ── page.dragAndDrop ──
@@ -117,8 +126,9 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, "dragAndDrop", locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, "dragAndDrop", locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
                 # ── page.locator(...).scrollIntoViewIfNeeded() ──
@@ -128,8 +138,9 @@ def parse_spec_file(file_path):
                 )
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
-                    actions.append(_action(idx, pending_comment, raw_line, "scroll", locator))
+                    actions.append(_action(idx, pending_comment, raw_line, "scroll", locator, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
                 # ── expect(...).toContainText(...) ──
@@ -140,17 +151,19 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, "validate", locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, "validate", locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
     return goto_url, actions, lines
 
 
-def _action(line_index, comment, raw_line, action_type, locator, value=None):
+def _action(line_index, comment, raw_line, action_type, locator, value=None, step_description=None):
     return {
         "line_index": line_index,
         "comment": comment,
+        "step_description": step_description,
         "raw_line": raw_line,
         "action_type": action_type,
         "locator": locator,
@@ -350,7 +363,14 @@ def run_script(spec_path):
                 print(f"         ❌ FAILED: {error_msg}")
 
                 # ── Self-heal ──
-                step_description = desc if desc != a_type else f"{a_type} on element"
+                # Prefer step_description (natural language) over comment (timestamp) for healing
+                step_desc = action.get("step_description")
+                if step_desc:
+                    step_description = step_desc
+                elif desc != a_type:
+                    step_description = desc
+                else:
+                    step_description = f"{a_type} on element"
                 new_locator = heal_locator(page, step_description, locator)
 
                 if new_locator:
