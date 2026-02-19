@@ -23,6 +23,26 @@ PATTERNS = {
             "Always use the data-testid='menu-icon' XPath first. Only use fallback selectors if the main one is not present. "
             "Return a unique XPath matching exactly one element."
         )
+    },
+    "sidebar_menu_item": {
+        "summary": "Sidebar / Left-nav menu items",
+        "description": (
+            "Sidebar menu items are MUI list items inside a Drawer. Each item has a "
+            "MuiListItemText-root div with an aria-label (e.g. aria-label='Configure') "
+            "and a span with class MuiListItemText-primary containing the visible text. "
+            "The clickable element is a div with role='button' and class MuiListItemButton-root. "
+            "ALWAYS click the div[@role='button'] ancestor, NOT the inner text span."
+        ),
+        "priority_selectors": [
+            "//div[@aria-label='{ITEM_NAME}']/ancestor::div[@role='button']",
+            "//span[normalize-space(text())='{ITEM_NAME}']/ancestor::div[@role='button']",
+            "//span[contains(text(),'{ITEM_NAME}')]/ancestor::div[@role='button']"
+        ],
+        "notes": (
+            "Replace {ITEM_NAME} with the actual menu item text (e.g. 'Configure', 'Reports'). "
+            "For items with special chars like '&' (e.g. 'Challenge & Solicitation'), use contains() "
+            "with a partial match (e.g. contains(text(),'Challenge'))."
+        )
     }
 }
 
@@ -32,6 +52,10 @@ import json
 APP_PATTERNS = (
     "# Application patterns (compact)\n"
     "- PRIORITY: Always use `data-testid='menu-icon'` for menu/hamburger icon.\n"
+    "- SIDEBAR ITEMS: Use `//div[@aria-label='ITEM_NAME']/ancestor::div[@role='button']` "
+    "for sidebar/nav menu items. The aria-label on MuiListItemText-root identifies the item. "
+    "Always target the clickable `div[@role='button']` ancestor.\n"
+    "- For sidebar text with special chars (& etc.), use `contains()` instead of exact match.\n"
     "- Attribute priority (highest → lowest): data-testid, id, name, aria-label, placeholder, text, class, position.\n"
     "- Pattern examples follow as JSON for exact matching.\n\n"
     "PATTERN_JSON: " + json.dumps(PATTERNS, indent=2)

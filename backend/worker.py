@@ -117,6 +117,74 @@ def parse_excel(file_path):
     
     return test_cases
 
+def try_fast_locator(page, step_description):
+    """
+    Try to find an element using common structural patterns BEFORE calling the LLM.
+    This is a fast-path (milliseconds) that avoids expensive LLM calls for
+    straightforward elements like sidebar items, buttons, links, inputs.
+
+    Returns: (locator_string, locator_type) or (None, None) if no unique match.
+    """
+    import re as _re
+
+    # Extract the likely target text from the step description
+    target_text = step_description.strip()
+
+    # Strip common action prefixes
+    target_text = _re.sub(
+        r'^(click\s+on|click|tap\s+on|tap|press|select|choose|open|expand|collapse|hover\s+over|hover)\s+',
+        '', target_text, flags=_re.IGNORECASE
+    ).strip()
+
+    # Strip surrounding quotes if present
+    if len(target_text) >= 2 and target_text[0] in ('"', "'") and target_text[-1] == target_text[0]:
+        target_text = target_text[1:-1]
+
+    if not target_text or len(target_text) < 2:
+        return None, None
+
+    print(f"[FAST-LOCATOR] Trying fast path for: '{target_text}'")
+
+    # Generic structural XPath patterns (not app-specific)
+    fast_xpaths = [
+        # aria-label exact match -> clickable ancestor (sidebar, nav items)
+        f"//div[@aria-label='{target_text}']/ancestor::div[@role='button']",
+        # aria-label on a clickable element itself
+        f"//*[@aria-label='{target_text}'][@role='button' or self::button or self::a]",
+        # Span text exact match -> clickable ancestor (MUI list items)
+        f"//span[normalize-space(text())='{target_text}']/ancestor::div[@role='button']",
+        # Button with exact text
+        f"//button[normalize-space(.)='{target_text}']",
+        # Link with exact text
+        f"//a[normalize-space(.)='{target_text}']",
+        # Tab / role=tab
+        f"//*[@role='tab'][.//text()[normalize-space(.)='{target_text}']]",
+        # data-testid containing the text (case-insensitive)
+        f"//*[@data-testid and contains(translate(@data-testid,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), '{target_text.lower().replace(' ', '-')}')]",
+    ]
+
+    # For texts with special chars (& etc.), add contains() fallbacks
+    safe_text = target_text.split('&')[0].strip() if '&' in target_text else None
+    if safe_text and len(safe_text) >= 3:
+        fast_xpaths.extend([
+            f"//div[contains(@aria-label,'{safe_text}')]/ancestor::div[@role='button']",
+            f"//span[contains(text(),'{safe_text}')]/ancestor::div[@role='button']",
+        ])
+
+    for xpath in fast_xpaths:
+        try:
+            loc = page.locator(f"xpath={xpath}")
+            count = loc.count()
+            if count == 1 and loc.first.is_visible():
+                print(f"[FAST-LOCATOR] Found unique visible match: {xpath}")
+                return xpath, "xpath"
+        except Exception:
+            pass
+
+    print(f"[FAST-LOCATOR] No unique match, falling back to LLM")
+    return None, None
+
+
 def get_locator_from_ai(page_dom, step_description):
     """
     Send page DOM and step description to LLM to get a smart locator.
@@ -130,6 +198,10 @@ def get_locator_from_ai(page_dom, step_description):
         print(f"[LLM] Sending request for step: {step_description[:60]}...")
         
         # Build the prompt with app patterns
+        app_patterns_section = ""
+        if APP_PATTERNS:
+            app_patterns_section = f"\n## Application-Specific Patterns:\n{APP_PATTERNS}\n"
+
         prompt = f"""You are a web automation expert. Given the DOM of a webpage and a test step description, 
 find a UNIQUE XPath to locate the PRIMARY element that should be interacted with.
 
@@ -149,7 +221,15 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
 7. Make the XPath specific enough that it won't match other similar elements
 8. **For SVGs and icons**: Identify the action/purpose, not just the visual. Look for parent buttons or aria-labels
 9. For hamburger icons or menu icons(svg), always return `//*[@data-testid='menu-icon']` if available. Only use fallbacks if not present.
-
+10. **For sidebar / navigation menu items** (e.g. "Click on Configure", "Click Challenge"):
+   - These are typically list items in a drawer/sidebar with `aria-label` on the text container or visible text in a `<span>`.
+   - Use `aria-label` attribute: `//div[@aria-label='Configure']/ancestor::div[@role='button']` 
+   - Or use text content: `//span[normalize-space(text())='Configure']/ancestor::div[@role='button']`
+   - ALWAYS target the nearest CLICKABLE ancestor element (`div[@role='button']`, `button`, or `a`) — NOT the inner text span itself.
+   - If the text uses HTML entities (e.g., `&amp;`), use `contains()` with partial text rather than exact match: `//span[contains(text(),'Challenge')]/ancestor::div[@role='button']`
+11. **For elements with special characters in text** (like `&`, `<`, `>`): Use `contains()` with a safe substring instead of exact matching.
+12. When the step says "click on X" and X appears both in a sidebar menu AND elsewhere on the page, prefer the sidebar menu item (inside a drawer/nav/MuiList container).
+{app_patterns_section}
 ## Example good XPaths (with data-testid priority):
    - //button[@data-testid='upload-button']
    - //input[@data-testid='email-input']
@@ -157,6 +237,8 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
    - //button[contains(text(), 'Login')]
    - //select[@name='country']
    - //button[@aria-label='Close']
+   - //div[@aria-label='Configure']/ancestor::div[@role='button']
+   - //span[contains(text(),'Challenge')]/ancestor::div[@role='button']
 
 ## Page DOM:
 {page_dom}
@@ -422,7 +504,8 @@ def wait_for_loader(page):
         pass
 
 def get_page_dom_simple(page):
-    """Get complete DOM snapshot including iframes and Shadow DOM for AI analysis"""
+    """Get complete DOM snapshot including iframes and Shadow DOM for AI analysis.
+    Strips bloat (base64 images, SVG paths, long classes) to keep DOM small."""
     try:
         dom_snapshot = page.evaluate('''() => {
     function getVisibleDOMSnapshot() {
@@ -430,9 +513,27 @@ def get_page_dom_simple(page):
             if (!node.attributes) return '';
             let attrs = '';
             for (const attr of node.attributes) {
-                if (['id','class','name','data-testid','role','aria-label','placeholder','title','href'].includes(attr.name)) {
-                    attrs += ` ${attr.name}="${attr.value}"`;
+                const name = attr.name;
+                let value = attr.value;
+
+                // Only keep useful attributes
+                if (!['id','class','name','data-testid','role','aria-label',
+                       'placeholder','title','href','type','tabindex','aria-selected',
+                       'aria-expanded','aria-haspopup','value'].includes(name)) {
+                    continue;
                 }
+
+                // Truncate base64 data in src/href
+                if ((name === 'href') && value.startsWith('data:')) {
+                    value = '[base64-data]';
+                }
+
+                // Truncate very long class names (MUI classes can be 300+ chars)
+                if (name === 'class' && value.length > 100) {
+                    value = value.substring(0, 100) + '...';
+                }
+
+                attrs += ` ${name}="${value}"`;
             }
             return attrs;
         };
@@ -440,9 +541,31 @@ def get_page_dom_simple(page):
         const serializeNode = (node, indent = '') => {
             if (node.nodeType !== Node.ELEMENT_NODE) return '';
             const tag = node.tagName.toLowerCase();
-            if (['script','style','link','meta'].includes(tag)) return '';
 
-            let output = `${indent}<${tag}${getAttributes(node)}>\n`;
+            // Skip non-visible / non-useful elements
+            if (['script','style','link','meta','noscript'].includes(tag)) return '';
+
+            // Skip SVG internals (path, circle, rect, etc.) — keep the SVG tag itself for context
+            if (['path','circle','rect','line','polygon','polyline','ellipse','use','defs',
+                 'clippath','lineargradient','radialgradient','stop','g','mask','filter',
+                 'fegaussianblur','feoffset','feblend','fecolormatrix','fecomposite'].includes(tag)) {
+                return '';
+            }
+
+            // For img tags, strip base64 src
+            let extraAttrs = '';
+            if (tag === 'img') {
+                const src = node.getAttribute('src') || '';
+                const alt = node.getAttribute('alt') || '';
+                if (src.startsWith('data:')) {
+                    extraAttrs = ' src="[base64-image]"';
+                } else if (src) {
+                    extraAttrs = ` src="${src.length > 80 ? src.substring(0, 80) + '...' : src}"`;
+                }
+                if (alt) extraAttrs += ` alt="${alt}"`;
+            }
+
+            let output = `${indent}<${tag}${getAttributes(node)}${extraAttrs}>\n`;
 
             // Shadow DOM
             if (node.shadowRoot) {
@@ -1405,8 +1528,12 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 action_failed = True
                         
                         else:
-                            # Send DOM to LLM to get locator for interactive actions
-                            locator, locator_type = get_locator_from_ai(dom, description_for_exec or search_text)
+                            # Try fast structural locator first (no LLM needed)
+                            locator, locator_type = try_fast_locator(page, description_for_exec or search_text)
+
+                            # Fall back to LLM if fast-path didn't find a unique match
+                            if not locator:
+                                locator, locator_type = get_locator_from_ai(dom, description_for_exec or search_text)
                             
                             if not locator:
                                 error_msg = f'LLM could not find locator for: "{description_for_exec or search_text}"'
