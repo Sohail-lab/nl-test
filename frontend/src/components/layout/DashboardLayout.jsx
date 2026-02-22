@@ -24,11 +24,11 @@ export function DashboardLayout({ children }) {
   );
 
   const pageTitle =
-    pathname === "/reports" ? "Execution Reports" : "Automation Command Center";
+    pathname === "/reports" ? "Execution Reports" : "Dashboard";
   const pageSubtitle =
     pathname === "/reports"
       ? "Review test outcomes, network events, and console diagnostics."
-      : "Upload scenario files, execute web tests, and monitor progress in real time.";
+      : "Upload test files, execute web tests, and monitor progress in real time.";
   const updatedDate = useMemo(
     () =>
       new Date().toLocaleDateString(undefined, {
@@ -59,20 +59,20 @@ export function DashboardLayout({ children }) {
               }`}
             >
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
-                Automation Workspace
+                AI Test Script
               </p>
               <h1 className="text-base font-bold tracking-tight text-slate-900">
-                Text-to-Test Studio
+                Generation Tool
               </h1>
             </div>
 
-            <button
+            {/* <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
               className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600 transition hover:border-sky-200 hover:text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
               aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
             >
               {sidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-            </button>
+            </button> */}
           </div>
 
           <nav className="flex-1 space-y-2 overflow-y-auto px-3 py-5">
@@ -106,7 +106,7 @@ export function DashboardLayout({ children }) {
             })}
           </nav>
 
-          <div className="border-t border-slate-100 p-4">
+          {/* <div className="border-t border-slate-100 p-4">
             {sidebarOpen ? (
               <div className="rounded-2xl border border-sky-100 bg-gradient-to-br from-sky-50 to-cyan-50 p-3">
                 <p className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sky-700">
@@ -123,7 +123,7 @@ export function DashboardLayout({ children }) {
                 <Sparkles className="h-5 w-5 text-sky-600" />
               </div>
             )}
-          </div>
+          </div> */}
         </aside>
 
         <div className="min-w-0 flex-1">
@@ -140,10 +140,10 @@ export function DashboardLayout({ children }) {
                   <p className="mt-1 text-sm text-slate-600">{pageSubtitle}</p>
                 </div>
 
-                <div className="inline-flex items-center gap-2 self-start rounded-full border border-sky-100 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 sm:self-auto">
+                {/* <div className="inline-flex items-center gap-2 self-start rounded-full border border-sky-100 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 sm:self-auto">
                   <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-500" />
                   Updated {updatedDate}
-                </div>
+                </div> */}
               </div>
             </header>
 

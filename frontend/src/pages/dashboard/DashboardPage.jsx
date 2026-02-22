@@ -373,16 +373,14 @@ export default function DashboardPage() {
       <div className="mx-auto max-w-5xl space-y-6">
         <section className="rounded-3xl border border-sky-100 bg-gradient-to-r from-sky-50 via-cyan-50 to-blue-50 p-6 shadow-sm">
           <p className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-sky-700">
-            <Activity className="h-3.5 w-3.5" />
-            Test Orchestration
+            {/* <Activity className="h-3.5 w-3.5" /> */}
+            Test
           </p>
           <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">
-            Launch Web Automation from Excel Scenarios
+            Launch Web Automation from Excel Files
           </h1>
           <p className="mt-2 max-w-3xl text-sm text-slate-600">
-            Provide your target website and upload an Excel suite. The system will
-            execute your workflow and stream job progress, step outcomes, and final
-            diagnostics here.
+            Provide your target website and upload an Excel file with test steps.
           </p>
         </section>
 
