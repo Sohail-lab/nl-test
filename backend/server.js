@@ -4,6 +4,7 @@ const path = require('path');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const SAVED_URLS_FILE = path.join(__dirname, 'saved_urls.json');
 
 const jobs = new Map();
 
@@ -32,6 +33,68 @@ function findPythonCommand() {
 const PYTHON_CMD = findPythonCommand();
 const PY_WORKER_PATH = path.join(__dirname, 'worker.py');
 const HAS_PY_WORKER = fs.existsSync(PY_WORKER_PATH) && PYTHON_CMD !== null;
+
+function ensureSavedUrlsFile() {
+    if (!fs.existsSync(SAVED_URLS_FILE)) {
+        fs.writeFileSync(SAVED_URLS_FILE, '[]', 'utf8');
+        return;
+    }
+
+    try {
+        const data = JSON.parse(fs.readFileSync(SAVED_URLS_FILE, 'utf8'));
+        if (!Array.isArray(data)) throw new Error('saved_urls.json must be an array');
+    } catch (e) {
+        fs.writeFileSync(SAVED_URLS_FILE, '[]', 'utf8');
+    }
+}
+
+function readSavedUrls() {
+    ensureSavedUrlsFile();
+    const data = JSON.parse(fs.readFileSync(SAVED_URLS_FILE, 'utf8'));
+    return Array.isArray(data) ? data : [];
+}
+
+function writeSavedUrlsAtomic(entries) {
+    const tmpPath = `${SAVED_URLS_FILE}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(entries, null, 2), 'utf8');
+    fs.renameSync(tmpPath, SAVED_URLS_FILE);
+}
+
+function normalizeName(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
+function normalizeUrl(url) {
+    const parsed = new URL(String(url || '').trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error('URL must start with http:// or https://');
+    }
+    return parsed.toString();
+}
+
+function parseJsonBody(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8').trim();
+            if (!body) {
+                resolve({});
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(body);
+                resolve(parsed);
+            } catch (e) {
+                reject(new Error('Invalid JSON body'));
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+ensureSavedUrlsFile();
 
 function bufferSplit(buffer, sep) {
     const parts = [];
@@ -203,6 +266,95 @@ const server = http.createServer((req, res) => {
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
+        return;
+    }
+
+    if (req.method === 'GET' && req.url === '/saved-urls') {
+        try {
+            const savedUrls = readSavedUrls();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ savedUrls }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to read saved URLs' }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/saved-urls') {
+        parseJsonBody(req)
+            .then((body) => {
+                const rawName = typeof body.name === 'string' ? body.name.trim() : '';
+                const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+
+                if (!rawName) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'name is required' }));
+                    return;
+                }
+
+                if (!rawUrl) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'url is required' }));
+                    return;
+                }
+
+                let normalizedUrl;
+                try {
+                    normalizedUrl = normalizeUrl(rawUrl);
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'url must be a valid absolute http(s) URL' }));
+                    return;
+                }
+
+                const normalizedName = normalizeName(rawName);
+                const savedUrls = readSavedUrls();
+
+                const existingName = savedUrls.find(
+                    (entry) => normalizeName(entry.name) === normalizedName
+                );
+                if (existingName) {
+                    res.writeHead(409, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'A saved URL with this name already exists' }));
+                    return;
+                }
+
+                const existingUrl = savedUrls.find((entry) => {
+                    try {
+                        return normalizeUrl(entry.url) === normalizedUrl;
+                    } catch (e) {
+                        return String(entry.url || '').trim() === normalizedUrl;
+                    }
+                });
+
+                if (existingUrl) {
+                    res.writeHead(409, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'This URL is already saved' }));
+                    return;
+                }
+
+                const savedUrl = {
+                    name: rawName,
+                    url: normalizedUrl,
+                    createdAt: new Date().toISOString(),
+                };
+
+                savedUrls.push(savedUrl);
+                writeSavedUrlsAtomic(savedUrls);
+
+                res.writeHead(201, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ savedUrl }));
+            })
+            .catch((err) => {
+                const isInvalidBody = err && err.message === 'Invalid JSON body';
+                res.writeHead(isInvalidBody ? 400 : 500, { 'Content-Type': 'application/json' });
+                res.end(
+                    JSON.stringify({
+                        error: isInvalidBody ? 'Invalid JSON body' : 'Failed to save URL',
+                    })
+                );
+            });
         return;
     }
 

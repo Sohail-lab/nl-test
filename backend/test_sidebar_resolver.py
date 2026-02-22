@@ -102,6 +102,7 @@ class SidebarMenuIconSelectionTests(unittest.TestCase):
         xpaths = worker.build_sidebar_click_xpaths('Challenge & Solicitation')
         self.assertTrue(xpaths)
         self.assertTrue(any('IvpLeftMenuDrawer' in xp or 'testDrawer' in xp for xp in xpaths))
+        self.assertTrue(any('MuiPopper-root' in xp or 'MuiPopover-root' in xp for xp in xpaths))
 
 
 class DecomposeHeuristicTests(unittest.TestCase):

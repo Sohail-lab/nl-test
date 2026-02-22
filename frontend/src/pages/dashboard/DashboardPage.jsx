@@ -16,6 +16,13 @@ import { DashboardLayout } from "../../components/layout/DashboardLayout";
 import { Card } from "../../components/ui/card";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 
 const API = "http://localhost:4000";
 
@@ -28,8 +35,46 @@ export default function DashboardPage() {
   const [jobStatus, setJobStatus] = useState(null);
   const [result, setResult] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [savedUrls, setSavedUrls] = useState([]);
+  const [savedUrlsLoading, setSavedUrlsLoading] = useState(false);
+  const [saveUrlModalOpen, setSaveUrlModalOpen] = useState(false);
+  const [saveUrlName, setSaveUrlName] = useState("");
+  const [savingUrl, setSavingUrl] = useState(false);
+  const [selectedSavedName, setSelectedSavedName] = useState("");
   const fileInputRef = useRef();
   const pollIntervalRef = useRef(null);
+
+  const normalizeHttpUrl = (value) => {
+    try {
+      const parsed = new URL(String(value || "").trim());
+      if (!["http:", "https:"].includes(parsed.protocol)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  };
+
+  const loadSavedUrls = async () => {
+    setSavedUrlsLoading(true);
+    try {
+      const res = await fetch(`${API}/saved-urls`);
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.savedUrls)) {
+        setSavedUrls(data.savedUrls);
+      } else {
+        setSavedUrls([]);
+      }
+    } catch (e) {
+      console.error("Failed to load saved URLs:", e);
+      setSavedUrls([]);
+    } finally {
+      setSavedUrlsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSavedUrls();
+  }, []);
 
   useEffect(() => {
     if (!jobId) return;
@@ -79,6 +124,12 @@ export default function DashboardPage() {
     };
   }, [jobId]);
 
+  useEffect(() => {
+    if (!selectedSavedName) return;
+    const exists = savedUrls.some((entry) => entry.name === selectedSavedName);
+    if (!exists) setSelectedSavedName("");
+  }, [savedUrls, selectedSavedName]);
+
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
     if (selectedFile) setFile(selectedFile);
@@ -93,6 +144,74 @@ export default function DashboardPage() {
   };
 
   const handleDragOver = (e) => e.preventDefault();
+
+  const handleImportSavedUrl = (name) => {
+    setSelectedSavedName(name);
+    const selected = savedUrls.find((entry) => entry.name === name);
+    if (!selected) return;
+    setWebsiteUrl(selected.url);
+    setMessage(`Imported URL: ${selected.name}`);
+  };
+
+  const openSaveUrlModal = () => {
+    if (!normalizeHttpUrl(websiteUrl)) {
+      setMessage("Error: Enter a valid http(s) URL before saving.");
+      return;
+    }
+    setSaveUrlName("");
+    setSaveUrlModalOpen(true);
+  };
+
+  const closeSaveUrlModal = () => {
+    if (savingUrl) return;
+    setSaveUrlModalOpen(false);
+    setSaveUrlName("");
+  };
+
+  const handleSaveUrl = async () => {
+    const normalizedWebsiteUrl = normalizeHttpUrl(websiteUrl);
+    if (!normalizedWebsiteUrl) {
+      setMessage("Error: Enter a valid http(s) URL before saving.");
+      return;
+    }
+
+    const trimmedName = saveUrlName.trim();
+    if (!trimmedName) {
+      setMessage("Error: URL name is required.");
+      return;
+    }
+
+    setSavingUrl(true);
+    try {
+      const res = await fetch(`${API}/saved-urls`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: trimmedName,
+          url: normalizedWebsiteUrl,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage(`Error: ${data.error || "Failed to save URL."}`);
+        return;
+      }
+
+      setSaveUrlModalOpen(false);
+      setSaveUrlName("");
+      setSelectedSavedName(trimmedName);
+      setMessage(`Saved URL: ${trimmedName}`);
+      await loadSavedUrls();
+    } catch (e) {
+      console.error("Failed to save URL:", e);
+      setMessage("Error: Failed to save URL.");
+    } finally {
+      setSavingUrl(false);
+    }
+  };
 
   const handleStop = async () => {
     if (!jobId) return;
@@ -160,6 +279,10 @@ export default function DashboardPage() {
     setProgress(null);
     setMessage("");
     setLoading(false);
+    setSelectedSavedName("");
+    setSaveUrlModalOpen(false);
+    setSaveUrlName("");
+    setSavingUrl(false);
   };
 
   const statusTone = {
@@ -181,7 +304,72 @@ export default function DashboardPage() {
   const isMessageError = /error|failed/i.test(message);
 
   return (
-    <DashboardLayout>
+    <>
+      {saveUrlModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm"
+          onClick={closeSaveUrlModal}
+        >
+          <div
+            className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <h2 className="text-lg font-bold text-slate-900">Save Target URL</h2>
+              <button
+                onClick={closeSaveUrlModal}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+                disabled={savingUrl}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-4 p-5">
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  URL
+                </label>
+                <Input
+                  value={normalizeHttpUrl(websiteUrl) || websiteUrl}
+                  readOnly
+                  className="bg-slate-100 text-slate-600"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  URL Name
+                </label>
+                <Input
+                  placeholder="Example: UAT, Staging, Production"
+                  value={saveUrlName}
+                  onChange={(e) => setSaveUrlName(e.target.value)}
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-slate-50/60 px-5 py-4">
+              <Button variant="outline" onClick={closeSaveUrlModal} disabled={savingUrl}>
+                Cancel
+              </Button>
+              <Button onClick={handleSaveUrl} disabled={savingUrl}>
+                {savingUrl ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  "Save URL"
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <DashboardLayout>
       <div className="mx-auto max-w-5xl space-y-6">
         <section className="rounded-3xl border border-sky-100 bg-gradient-to-r from-sky-50 via-cyan-50 to-blue-50 p-6 shadow-sm">
           <p className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-sky-700">
@@ -206,12 +394,63 @@ export default function DashboardPage() {
                   <Globe className="h-4 w-4 text-sky-600" />
                   Target Website URL
                 </label>
-                <Input
-                  placeholder="https://example.com"
-                  value={websiteUrl}
-                  onChange={(e) => setWebsiteUrl(e.target.value)}
-                  className="w-full"
-                />
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-3 sm:p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        placeholder="https://example.com"
+                        value={websiteUrl}
+                        onChange={(e) => {
+                          setWebsiteUrl(e.target.value);
+                          setSelectedSavedName("");
+                        }}
+                        className="w-full"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-3 sm:flex-row lg:w-auto">
+                      <Select
+                        value={selectedSavedName || undefined}
+                        onValueChange={handleImportSavedUrl}
+                        disabled={savedUrlsLoading || savedUrls.length === 0}
+                      >
+                        <SelectTrigger className="w-full min-w-[220px] bg-white sm:w-[240px]">
+                          <SelectValue
+                            placeholder={
+                              savedUrlsLoading
+                                ? "Loading saved URLs..."
+                                : "Import saved URL"
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {savedUrls.map((entry) => (
+                            <SelectItem key={entry.name} value={entry.name}>
+                              {entry.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+
+                      <Button
+                        variant="outline"
+                        onClick={openSaveUrlModal}
+                        disabled={!websiteUrl || savingUrl}
+                        className="min-w-32"
+                      >
+                        Save URL
+                      </Button>
+                    </div>
+                  </div>
+
+                  <p className="mt-2 text-xs font-semibold text-slate-500">
+                    {savedUrlsLoading
+                      ? "Loading saved URLs..."
+                      : savedUrls.length > 0
+                      ? `${savedUrls.length} saved URL${savedUrls.length === 1 ? "" : "s"} available`
+                      : "No saved URLs yet. Save one to import quickly later."}
+                  </p>
+                </div>
               </div>
 
               <div>
@@ -547,6 +786,7 @@ export default function DashboardPage() {
           </Card>
         )}
       </div>
-    </DashboardLayout>
+      </DashboardLayout>
+    </>
   );
 }

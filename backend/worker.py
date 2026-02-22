@@ -254,7 +254,7 @@ def choose_best_menu_icon(menu_icons):
 
 
 def build_sidebar_click_xpaths(label_raw):
-    """Build drawer-scoped XPath candidates for a sidebar label."""
+    """Build drawer/overlay-scoped XPath candidates for a sidebar label."""
     label_raw = _collapse_ws(html.unescape(label_raw))
     if not label_raw:
         return []
@@ -275,12 +275,20 @@ def build_sidebar_click_xpaths(label_raw):
         f"//*[contains(@class,'IvpLeftMenuDrawer')]//span[normalize-space(text())={label_lit}]/ancestor::div[@role='button'][1]",
         # Case-insensitive aria-label fallback
         f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {lower_lit})]/ancestor::div[@role='button'][1]",
+        # Overlay/popper/menu scoped aria-label
+        f"//*[contains(@class,'MuiPopper-root') or contains(@class,'MuiPopover-root') or @role='menu' or @role='listbox']//div[@aria-label={label_lit}]/ancestor::div[@role='button'][1]",
+        # Overlay/popper/menu text fallback
+        f"//*[contains(@class,'MuiPopper-root') or contains(@class,'MuiPopover-root') or @role='menu' or @role='listbox']//span[normalize-space(text())={label_lit}]/ancestor::div[@role='button'][1]",
+        # Overlay/popper/menu case-insensitive aria-label fallback
+        f"//*[contains(@class,'MuiPopper-root') or contains(@class,'MuiPopover-root') or @role='menu' or @role='listbox']//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {lower_lit})]/ancestor::div[@role='button'][1]",
     ]
 
     if safe_partial and len(safe_partial) >= 3 and safe_partial_lit:
         xpaths.extend([
             f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
             f"//*[contains(@class,'IvpLeftMenuDrawer')]//span[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
+            f"//*[contains(@class,'MuiPopper-root') or contains(@class,'MuiPopover-root') or @role='menu' or @role='listbox']//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
+            f"//*[contains(@class,'MuiPopper-root') or contains(@class,'MuiPopover-root') or @role='menu' or @role='listbox']//span[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
         ])
 
     # Preserve order while removing duplicates.
@@ -313,11 +321,19 @@ def get_sidebar_state(page):
                 null;
             const drawerPaper = drawerRoot ? drawerRoot.querySelector('.MuiDrawer-paper') : null;
             const drawerContainer = drawerPaper || drawerRoot;
-            const scanRoot = drawerContainer || document;
+            const overlayRoots = Array.from(
+                document.querySelectorAll('[role="menu"], [role="listbox"], .MuiPopover-root, .MuiPopper-root')
+            ).filter(isVisible);
 
-            const itemButtons = Array.from(
-                scanRoot.querySelectorAll('.LeftMenuListItem div[role="button"], li.LeftMenuListItem div[role="button"]')
+            const allButtons = Array.from(
+                document.querySelectorAll('.LeftMenuListItem div[role="button"], li.LeftMenuListItem div[role="button"]')
             );
+
+            const inDrawer = (el) => !!(drawerContainer && drawerContainer.contains(el));
+            const inOverlay = (el) => overlayRoots.some(root => root.contains(el));
+            const itemButtons = allButtons
+                .filter(btn => inDrawer(btn) || inOverlay(btn))
+                .filter(isVisible);
 
             const items = itemButtons.map((btn, index) => {
                 const row = btn.closest('.LeftMenuListItem') || btn;
@@ -339,7 +355,8 @@ def get_sidebar_state(page):
                     index,
                     label_raw: labelRaw,
                     is_visible: isVisible(btn),
-                    has_expand_icon: hasExpandIcon
+                    has_expand_icon: hasExpandIcon,
+                    in_overlay: inOverlay(btn)
                 };
             });
 
@@ -352,11 +369,13 @@ def get_sidebar_state(page):
             const search = (drawerContainer || document).querySelector('input[placeholder="Search"]');
             const searchVisible = isVisible(search);
             const visibleItemCount = items.filter(i => i.is_visible).length;
+            const visibleOverlayItemCount = items.filter(i => i.is_visible && i.in_overlay).length;
 
             return {
                 drawer_present: !!drawerContainer,
-                is_open: !!drawerContainer && (visibleItemCount > 0 || searchVisible),
+                is_open: (!!drawerContainer && (visibleItemCount > 0 || searchVisible)) || visibleOverlayItemCount > 0,
                 visible_item_count: visibleItemCount,
+                visible_overlay_item_count: visibleOverlayItemCount,
                 search_visible: searchVisible,
                 items,
                 menu_icons: menuIcons
@@ -368,6 +387,7 @@ def get_sidebar_state(page):
             'drawer_present': False,
             'is_open': False,
             'visible_item_count': 0,
+            'visible_overlay_item_count': 0,
             'search_visible': False,
             'items': [],
             'menu_icons': [],
@@ -382,6 +402,7 @@ def get_sidebar_state(page):
             'label_normalized': normalize_sidebar_text(label_raw),
             'has_expand_icon': bool(item.get('has_expand_icon')),
             'is_visible': bool(item.get('is_visible')),
+            'in_overlay': bool(item.get('in_overlay')),
             'click_xpath': (build_sidebar_click_xpaths(label_raw)[0] if label_raw else None),
         })
 
@@ -389,6 +410,7 @@ def get_sidebar_state(page):
         'drawer_present': bool(raw.get('drawer_present')),
         'is_open': bool(raw.get('is_open')),
         'visible_item_count': int(raw.get('visible_item_count') or 0),
+        'visible_overlay_item_count': int(raw.get('visible_overlay_item_count') or 0),
         'search_visible': bool(raw.get('search_visible')),
         'items': items,
         'menu_icons': raw.get('menu_icons', []),
@@ -2060,6 +2082,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
     last_dom_reason = ''
     last_dom_marker = None
     current_step_marker = None
+    last_sidebar_click_key = None
 
     def capture_and_store_dom(snapshot_kind='full', include_testid=True, reason=''):
         """Capture DOM snapshot for diagnostics and LLM context reuse."""
@@ -2264,6 +2287,10 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                 # Use the sub-step description for parsing and execution
                 description_for_exec = sub_step_desc
                 current_step_marker = f"{idx}:{sub_idx}"
+                previous_substep_sidebar_click = (
+                    sub_idx > 0 and last_sidebar_click_key == f"{idx}:{sub_idx - 1}"
+                )
+                substep_sidebar_click_success = False
                 
                 # Parse the (sub-)step
                 if not raw_action and sub_step_desc:
@@ -2433,11 +2460,22 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         else:
                             sidebar_info = None
                             action_handled = False
+                            effective_sidebar_context = False
 
                             # 1) Deterministic sidebar resolver first for click actions.
                             if action == 'click':
                                 print("[EXECUTE] Trying deterministic sidebar resolver...")
                                 sidebar_ok, sidebar_info = click_sidebar_target(page, description_for_exec or search_text)
+                                effective_sidebar_context = bool(sidebar_info and sidebar_info.get('is_sidebar_context'))
+
+                                if previous_substep_sidebar_click and not effective_sidebar_context:
+                                    if sidebar_info is None:
+                                        sidebar_info = {}
+                                    sidebar_info['is_sidebar_context'] = True
+                                    sidebar_info['contextHint'] = 'previous-sub-step-sidebar-click'
+                                    effective_sidebar_context = True
+                                    print("[EXECUTE] Forcing sidebar context from previous sidebar sub-step")
+
                                 if sidebar_ok:
                                     locator = sidebar_info.get('locator')
                                     locator_type = sidebar_info.get('type', 'xpath')
@@ -2460,6 +2498,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     })
                                     print(f"[EXECUTE] SUCCESS: {description_for_exec} (sidebar-deterministic)")
                                     action_handled = True
+                                    substep_sidebar_click_success = True
                                 elif sidebar_info and sidebar_info.get('status') == 'ambiguous':
                                     # For ambiguous sidebar targets, fail explicitly to avoid wrong clicks.
                                     candidates = sidebar_info.get('topCandidates') or []
@@ -2498,24 +2537,43 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 use_fast_sidebar = (
                                     action == 'click'
                                     and sidebar_info
-                                    and sidebar_info.get('is_sidebar_context')
+                                    and effective_sidebar_context
                                 )
                                 if use_fast_sidebar:
                                     resolver = 'fast-locator'
                                     locator, locator_type = try_fast_locator(page, description_for_exec or search_text)
 
                                 # 3) LLM remains the main locator path.
+                                llm_attempted = False
+                                llm_used_sidebar_dom = False
                                 if not locator:
                                     resolver = 'llm'
                                     print(f"[EXECUTE] Capturing DOM for LLM locator...")
-                                    if action == 'click' and sidebar_info and sidebar_info.get('is_sidebar_context'):
+                                    if action == 'click' and sidebar_info and effective_sidebar_context:
                                         print("[EXECUTE] Using sidebar-focused DOM snapshot for LLM fallback")
                                         dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar')
+                                        llm_used_sidebar_dom = True
                                     else:
                                         print("[EXECUTE] Using full-page DOM snapshot for LLM fallback")
                                         dom = capture_and_store_dom('full', include_testid=True, reason='llm-full')
 
+                                    llm_attempted = True
                                     locator, locator_type = get_locator_from_ai(dom or '', description_for_exec or search_text)
+
+                                if (
+                                    not locator
+                                    and llm_attempted
+                                    and action == 'click'
+                                    and effective_sidebar_context
+                                ):
+                                    print("[EXECUTE] LLM returned no locator; retrying once with fresh sidebar DOM...")
+                                    wait_for_dom_settle(timeout_ms=1600, quiet_ms=250, label='llm-null-sidebar-retry')
+                                    retry_dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar-retry')
+                                    llm_used_sidebar_dom = True
+                                    locator, locator_type = get_locator_from_ai(
+                                        retry_dom or '',
+                                        description_for_exec or search_text
+                                    )
 
                                 if not locator:
                                     error_msg = f'Could not find locator for: "{description_for_exec or search_text}"'
@@ -2565,6 +2623,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                             'sidebarAutoOpened': (sidebar_info.get('sidebarAutoOpened') if sidebar_info else False),
                                         })
                                         print(f"[EXECUTE] SUCCESS: {description_for_exec}")
+                                        if action == 'click':
+                                            substep_sidebar_click_success = bool(effective_sidebar_context or llm_used_sidebar_dom)
                                     else:
                                         results.append({
                                             'step': idx,
@@ -2614,7 +2674,10 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 "[END_FAILED_STEP_DOM]\n"
                             )
                             append_debug_log(job_id, debug_block)
- 
+
+                if not action_failed:
+                    last_sidebar_click_key = current_step_marker if substep_sidebar_click_success else None
+  
                 # STOP SUB-STEP EXECUTION IF FAILED
                 if action_failed:
                     print(f"[EXECUTE] Sub-step failed - stopping execution")
