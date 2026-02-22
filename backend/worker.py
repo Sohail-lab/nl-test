@@ -4,6 +4,8 @@ import os
 import json
 import re
 import difflib
+import html
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -85,6 +87,18 @@ def write_result(job_id, result):
     with open(path, 'w', encoding='utf8') as f:
         json.dump(result, f, indent=2)
 
+
+def append_debug_log(job_id, message):
+    """Append diagnostic messages to per-job debug log."""
+    path = os.path.join(UPLOAD_DIR, f"{job_id}.debug.log")
+    try:
+        with open(path, 'a', encoding='utf8') as f:
+            f.write(str(message))
+            if not str(message).endswith('\n'):
+                f.write('\n')
+    except Exception as e:
+        print(f"[DEBUG] Failed to append debug log: {str(e)[:120]}")
+
 def parse_excel(file_path):
     try:
         import pandas as pd
@@ -117,6 +131,643 @@ def parse_excel(file_path):
     
     return test_cases
 
+
+SIDEBAR_FILLER_WORDS = {
+    'click', 'on', 'the', 'a', 'an', 'menu', 'sidebar', 'drawer', 'left', 'right',
+    'navigation', 'nav', 'dropdown', 'option', 'item', 'button', 'tab', 'expand',
+    'collapse', 'open', 'select', 'choose', 'tap', 'press', 'from', 'in', 'to',
+    'of', 'for', 'and', 'then'
+}
+
+SIDEBAR_ACTION_PREFIX_RE = re.compile(
+    r'^\s*(click|tap|press|open|expand|collapse|select|choose)\s+(on\s+)?',
+    flags=re.IGNORECASE
+)
+SIDEBAR_HINT_RE = re.compile(
+    r'\b(sidebar|left\s*menu|drawer|navigation|nav)\b',
+    flags=re.IGNORECASE
+)
+MENU_ICON_RE = re.compile(r'\b(menu\s*icon|hamburger)\b', flags=re.IGNORECASE)
+
+TOKEN_OVERLAP_THRESHOLD = 0.60
+FUZZY_MATCH_THRESHOLD = 0.86
+FUZZY_MARGIN_THRESHOLD = 0.05
+CONTAINS_MATCH_THRESHOLD = 0.60
+
+
+def _collapse_ws(value):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def _basic_sidebar_text(value):
+    return _collapse_ws(html.unescape(value)).lower()
+
+
+def xpath_literal(value):
+    """Return XPath-safe string literal."""
+    value = str(value or '')
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    parts = value.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
+
+
+def normalize_sidebar_text(text):
+    """Normalize free-form step text or labels for sidebar matching."""
+    if not text:
+        return ''
+
+    cleaned = html.unescape(str(text))
+    cleaned = SIDEBAR_ACTION_PREFIX_RE.sub('', cleaned).strip()
+    cleaned = cleaned.strip(' "\'`')
+    cleaned = cleaned.replace('&', ' and ')
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r'[^a-z0-9\s]', ' ', cleaned)
+    cleaned = _collapse_ws(cleaned)
+
+    tokens = [t for t in cleaned.split(' ') if t and t not in SIDEBAR_FILLER_WORDS]
+    return _collapse_ws(' '.join(tokens))
+
+
+def extract_sidebar_target(step_text):
+    """Extract a sidebar target candidate from free-form click steps."""
+    raw_step = _collapse_ws(step_text)
+    step_lower = _basic_sidebar_text(raw_step)
+
+    target_text = SIDEBAR_ACTION_PREFIX_RE.sub('', raw_step).strip()
+    target_text = re.sub(r'^\s*(the|a|an)\s+', '', target_text, flags=re.IGNORECASE)
+    target_text = target_text.strip(' "\'`')
+
+    normalized_target = normalize_sidebar_text(target_text)
+    explicit_sidebar = bool(SIDEBAR_HINT_RE.search(step_lower))
+    mentions_menu_icon = bool(MENU_ICON_RE.search(step_lower))
+
+    return {
+        'raw_step': raw_step,
+        'target_text': target_text,
+        'normalized_target': normalized_target,
+        'is_explicit_sidebar': explicit_sidebar,
+        'mentions_menu_icon': mentions_menu_icon,
+        'is_sidebar_candidate': bool(normalized_target) and not mentions_menu_icon,
+        'target_tokens': [t for t in normalized_target.split(' ') if t],
+    }
+
+
+def _token_overlap_score(a_text, b_text):
+    a_tokens = {t for t in normalize_sidebar_text(a_text).split(' ') if t}
+    b_tokens = {t for t in normalize_sidebar_text(b_text).split(' ') if t}
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / float(max(len(a_tokens), len(b_tokens)))
+
+
+def _build_top_candidates(candidates, limit=3):
+    out = []
+    for item in candidates[:limit]:
+        out.append({
+            'label': item.get('label_raw', ''),
+            'score': round(float(item.get('_score', 0.0)), 4)
+        })
+    return out
+
+
+def choose_best_menu_icon(menu_icons):
+    """Choose the most reliable menu icon when there are duplicates."""
+    if not menu_icons:
+        return None
+
+    visible_outside = [m for m in menu_icons if m.get('is_visible') and not m.get('inside_drawer')]
+    if visible_outside:
+        return visible_outside[0]
+
+    visible_any = [m for m in menu_icons if m.get('is_visible')]
+    if visible_any:
+        return visible_any[0]
+
+    outside_any = [m for m in menu_icons if not m.get('inside_drawer')]
+    if outside_any:
+        return outside_any[0]
+
+    return menu_icons[0]
+
+
+def build_sidebar_click_xpaths(label_raw):
+    """Build drawer-scoped XPath candidates for a sidebar label."""
+    label_raw = _collapse_ws(html.unescape(label_raw))
+    if not label_raw:
+        return []
+
+    label_lit = xpath_literal(label_raw)
+    lower_lit = xpath_literal(label_raw.lower())
+
+    norm = normalize_sidebar_text(label_raw)
+    safe_partial = norm.split(' and ')[0].strip() if ' and ' in norm else norm
+    safe_partial_lit = xpath_literal(safe_partial.lower()) if safe_partial else None
+
+    xpaths = [
+        # Primary: strict drawer-scoped aria-label
+        f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[@aria-label={label_lit}]/ancestor::div[@role='button'][1]",
+        # Fallback: drawer anchored from testDrawer node
+        f"//*[@data-testid='testDrawer']/ancestor::*[contains(@class,'IvpLeftMenuDrawer') or contains(@class,'MuiDrawer-root')][1]//div[@aria-label={label_lit}]/ancestor::div[@role='button'][1]",
+        # Text fallback in drawer
+        f"//*[contains(@class,'IvpLeftMenuDrawer')]//span[normalize-space(text())={label_lit}]/ancestor::div[@role='button'][1]",
+        # Case-insensitive aria-label fallback
+        f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {lower_lit})]/ancestor::div[@role='button'][1]",
+    ]
+
+    if safe_partial and len(safe_partial) >= 3 and safe_partial_lit:
+        xpaths.extend([
+            f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
+            f"//*[contains(@class,'IvpLeftMenuDrawer')]//span[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {safe_partial_lit})]/ancestor::div[@role='button'][1]",
+        ])
+
+    # Preserve order while removing duplicates.
+    seen = set()
+    deduped = []
+    for xp in xpaths:
+        if xp not in seen:
+            seen.add(xp)
+            deduped.append(xp)
+    return deduped
+
+
+def get_sidebar_state(page):
+    """Read sidebar/menu state from the live page."""
+    try:
+        raw = page.evaluate('''() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                    return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const drawerRoot =
+                document.querySelector('.IvpLeftMenuDrawer') ||
+                document.querySelector('[class*="IvpLeftMenuDrawer"]') ||
+                null;
+            const drawerPaper = drawerRoot ? drawerRoot.querySelector('.MuiDrawer-paper') : null;
+            const drawerContainer = drawerPaper || drawerRoot;
+            const scanRoot = drawerContainer || document;
+
+            const itemButtons = Array.from(
+                scanRoot.querySelectorAll('.LeftMenuListItem div[role="button"], li.LeftMenuListItem div[role="button"]')
+            );
+
+            const items = itemButtons.map((btn, index) => {
+                const row = btn.closest('.LeftMenuListItem') || btn;
+                const labelNode = row.querySelector('[aria-label]') || btn.querySelector('[aria-label]');
+                let labelRaw = '';
+                if (labelNode) {
+                    labelRaw = labelNode.getAttribute('aria-label') || '';
+                }
+                if (!labelRaw) {
+                    const span = row.querySelector('span');
+                    if (span) labelRaw = (span.textContent || '').trim();
+                }
+
+                const hasExpandIcon = !!row.querySelector(
+                    '[data-testid="ExpandMoreIcon"], [data-testid="ExpandLessIcon"], [data-testid*="Expand"]'
+                );
+
+                return {
+                    index,
+                    label_raw: labelRaw,
+                    is_visible: isVisible(btn),
+                    has_expand_icon: hasExpandIcon
+                };
+            });
+
+            const menuIcons = Array.from(document.querySelectorAll('[data-testid="menu-icon"]')).map((el, index) => ({
+                index,
+                is_visible: isVisible(el),
+                inside_drawer: !!(drawerContainer && drawerContainer.contains(el))
+            }));
+
+            const search = (drawerContainer || document).querySelector('input[placeholder="Search"]');
+            const searchVisible = isVisible(search);
+            const visibleItemCount = items.filter(i => i.is_visible).length;
+
+            return {
+                drawer_present: !!drawerContainer,
+                is_open: !!drawerContainer && (visibleItemCount > 0 || searchVisible),
+                visible_item_count: visibleItemCount,
+                search_visible: searchVisible,
+                items,
+                menu_icons: menuIcons
+            };
+        }''')
+    except Exception as e:
+        print(f"[SIDEBAR] Failed to inspect sidebar state: {str(e)[:120]}")
+        return {
+            'drawer_present': False,
+            'is_open': False,
+            'visible_item_count': 0,
+            'search_visible': False,
+            'items': [],
+            'menu_icons': [],
+        }
+
+    items = []
+    for item in raw.get('items', []):
+        label_raw = _collapse_ws(html.unescape(item.get('label_raw', '')))
+        items.append({
+            'index': item.get('index'),
+            'label_raw': label_raw,
+            'label_normalized': normalize_sidebar_text(label_raw),
+            'has_expand_icon': bool(item.get('has_expand_icon')),
+            'is_visible': bool(item.get('is_visible')),
+            'click_xpath': (build_sidebar_click_xpaths(label_raw)[0] if label_raw else None),
+        })
+
+    return {
+        'drawer_present': bool(raw.get('drawer_present')),
+        'is_open': bool(raw.get('is_open')),
+        'visible_item_count': int(raw.get('visible_item_count') or 0),
+        'search_visible': bool(raw.get('search_visible')),
+        'items': items,
+        'menu_icons': raw.get('menu_icons', []),
+    }
+
+
+def ensure_sidebar_open(page, timeout_ms=3000):
+    """Open sidebar when possible by selecting the best available menu icon."""
+    state = get_sidebar_state(page)
+    if state.get('is_open'):
+        return True, {'auto_opened': False, 'state': state}
+
+    chosen_icon = choose_best_menu_icon(state.get('menu_icons', []))
+    if not chosen_icon:
+        return False, {
+            'auto_opened': False,
+            'reason': 'No menu icon found',
+            'state': state
+        }
+
+    try:
+        clicked = page.evaluate(
+            '''(iconIndex) => {
+                const icons = Array.from(document.querySelectorAll('[data-testid="menu-icon"]'));
+                if (!icons[iconIndex]) return false;
+                icons[iconIndex].click();
+                return true;
+            }''',
+            int(chosen_icon.get('index', 0))
+        )
+        if not clicked:
+            return False, {
+                'auto_opened': False,
+                'reason': 'Menu icon index not found',
+                'state': state
+            }
+    except Exception as e:
+        return False, {
+            'auto_opened': False,
+            'reason': f'Failed to click menu icon: {str(e)[:100]}',
+            'state': state
+        }
+
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        time.sleep(0.15)
+        refreshed = get_sidebar_state(page)
+        if refreshed.get('is_open'):
+            return True, {
+                'auto_opened': True,
+                'used_menu_icon_index': chosen_icon.get('index'),
+                'state': refreshed
+            }
+
+    return False, {
+        'auto_opened': False,
+        'reason': 'Sidebar did not open before timeout',
+        'used_menu_icon_index': chosen_icon.get('index'),
+        'state': get_sidebar_state(page)
+    }
+
+
+def match_sidebar_item(target, items):
+    """
+    Match a free-form target against sidebar items with tiered strict->fuzzy logic.
+    Returns a dict containing status, candidate, score, and ambiguity diagnostics.
+    """
+    target_raw = _collapse_ws(html.unescape(target))
+    target_basic = _basic_sidebar_text(target_raw)
+    target_norm = normalize_sidebar_text(target_raw)
+
+    prepared = []
+    for item in items or []:
+        label_raw = _collapse_ws(item.get('label_raw', ''))
+        label_norm = item.get('label_normalized') or normalize_sidebar_text(label_raw)
+        prepared.append({
+            **item,
+            'label_raw': label_raw,
+            'label_normalized': label_norm,
+        })
+
+    if not target_norm:
+        return {
+            'ok': False,
+            'status': 'no_target',
+            'message': 'No sidebar target text after normalization',
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': []
+        }
+
+    if not prepared:
+        return {
+            'ok': False,
+            'status': 'no_items',
+            'message': 'No sidebar items found in DOM',
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': []
+        }
+
+    exact_raw = [
+        dict(item, _score=1.0)
+        for item in prepared
+        if _basic_sidebar_text(item['label_raw']) == target_basic and target_basic
+    ]
+    if len(exact_raw) == 1:
+        return {
+            'ok': True,
+            'status': 'matched',
+            'matchTier': 'exact-label',
+            'matchScore': 1.0,
+            'candidate': exact_raw[0],
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(exact_raw)
+        }
+    if len(exact_raw) > 1:
+        return {
+            'ok': False,
+            'status': 'ambiguous',
+            'message': 'Multiple exact sidebar labels matched',
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(exact_raw)
+        }
+
+    exact_norm = [
+        dict(item, _score=1.0)
+        for item in prepared
+        if item['label_normalized'] == target_norm
+    ]
+    if len(exact_norm) == 1:
+        return {
+            'ok': True,
+            'status': 'matched',
+            'matchTier': 'exact-normalized',
+            'matchScore': 1.0,
+            'candidate': exact_norm[0],
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(exact_norm)
+        }
+    if len(exact_norm) > 1:
+        return {
+            'ok': False,
+            'status': 'ambiguous',
+            'message': 'Multiple normalized sidebar labels matched',
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(exact_norm)
+        }
+
+    contains = []
+    target_token_count = len([t for t in target_norm.split(' ') if t])
+    for item in prepared:
+        label_norm = item['label_normalized']
+        if not label_norm:
+            continue
+        if target_norm in label_norm or label_norm in target_norm:
+            score = difflib.SequenceMatcher(None, target_norm, label_norm).ratio()
+            if score >= CONTAINS_MATCH_THRESHOLD or target_token_count <= 1:
+                contains.append(dict(item, _score=score))
+    contains.sort(key=lambda x: x.get('_score', 0.0), reverse=True)
+    if len(contains) == 1:
+        return {
+            'ok': True,
+            'status': 'matched',
+            'matchTier': 'contains',
+            'matchScore': round(float(contains[0].get('_score', 0.0)), 4),
+            'candidate': contains[0],
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(contains)
+        }
+    if len(contains) > 1:
+        return {
+            'ok': False,
+            'status': 'ambiguous',
+            'message': 'Multiple sidebar items matched by contains',
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(contains)
+        }
+
+    token_scored = []
+    for item in prepared:
+        score = _token_overlap_score(target_norm, item['label_normalized'])
+        if score >= TOKEN_OVERLAP_THRESHOLD:
+            token_scored.append(dict(item, _score=score))
+    token_scored.sort(key=lambda x: x.get('_score', 0.0), reverse=True)
+
+    if token_scored:
+        best = token_scored[0]
+        second = token_scored[1] if len(token_scored) > 1 else None
+        if second and (best.get('_score', 0.0) - second.get('_score', 0.0) < FUZZY_MARGIN_THRESHOLD):
+            return {
+                'ok': False,
+                'status': 'ambiguous',
+                'message': 'Token-overlap matching is ambiguous',
+                'target': target_raw,
+                'target_normalized': target_norm,
+                'topCandidates': _build_top_candidates(token_scored)
+            }
+        return {
+            'ok': True,
+            'status': 'matched',
+            'matchTier': 'token-overlap',
+            'matchScore': round(float(best.get('_score', 0.0)), 4),
+            'candidate': best,
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(token_scored)
+        }
+
+    fuzzy = []
+    for item in prepared:
+        score = difflib.SequenceMatcher(None, target_norm, item['label_normalized']).ratio()
+        fuzzy.append(dict(item, _score=score))
+    fuzzy.sort(key=lambda x: x.get('_score', 0.0), reverse=True)
+
+    if fuzzy and fuzzy[0].get('_score', 0.0) >= FUZZY_MATCH_THRESHOLD:
+        best = fuzzy[0]
+        second = fuzzy[1] if len(fuzzy) > 1 else None
+        if second and (best.get('_score', 0.0) - second.get('_score', 0.0) < FUZZY_MARGIN_THRESHOLD):
+            return {
+                'ok': False,
+                'status': 'ambiguous',
+                'message': 'Fuzzy matching is ambiguous',
+                'target': target_raw,
+                'target_normalized': target_norm,
+                'topCandidates': _build_top_candidates(fuzzy)
+            }
+        return {
+            'ok': True,
+            'status': 'matched',
+            'matchTier': 'fuzzy',
+            'matchScore': round(float(best.get('_score', 0.0)), 4),
+            'candidate': best,
+            'target': target_raw,
+            'target_normalized': target_norm,
+            'topCandidates': _build_top_candidates(fuzzy)
+        }
+
+    return {
+        'ok': False,
+        'status': 'no_match',
+        'message': 'No sidebar item matched the target',
+        'target': target_raw,
+        'target_normalized': target_norm,
+        'topCandidates': _build_top_candidates(fuzzy)
+    }
+
+
+def click_sidebar_target(page, step_text):
+    """
+    Deterministic sidebar click handler. Returns (ok, info).
+    When successful, it performs the click directly and appends script lines.
+    """
+    target_info = extract_sidebar_target(step_text)
+    info = {
+        'resolver': 'sidebar-deterministic',
+        'status': 'skipped',
+        'is_sidebar_candidate': target_info.get('is_sidebar_candidate', False),
+        'is_sidebar_context': bool(target_info.get('is_explicit_sidebar', False)),
+        'target': target_info.get('target_text', ''),
+        'target_normalized': target_info.get('normalized_target', ''),
+        'sidebarAutoOpened': False,
+        'topCandidates': []
+    }
+
+    if not target_info.get('is_sidebar_candidate'):
+        return False, info
+
+    state = get_sidebar_state(page)
+    match = match_sidebar_item(target_info.get('target_text', ''), state.get('items', []))
+    if match.get('ok') or match.get('status') == 'ambiguous':
+        info['is_sidebar_context'] = True
+
+    # If the user explicitly referred to sidebar/nav and drawer looks closed, open first then rematch.
+    if (not match.get('ok')) and target_info.get('is_explicit_sidebar') and (not state.get('is_open')):
+        opened, open_info = ensure_sidebar_open(page)
+        info['sidebarAutoOpened'] = bool(open_info.get('auto_opened'))
+        if not opened:
+            info.update({
+                'status': 'open_failed',
+                'message': open_info.get('reason', 'Could not open sidebar'),
+                'topCandidates': match.get('topCandidates', [])
+            })
+            return False, info
+        state = get_sidebar_state(page)
+        match = match_sidebar_item(target_info.get('target_text', ''), state.get('items', []))
+        if match.get('ok') or match.get('status') == 'ambiguous':
+            info['is_sidebar_context'] = True
+
+    # If we already matched a sidebar item but the drawer is closed, auto-open then rematch.
+    if match.get('ok') and not state.get('is_open'):
+        opened, open_info = ensure_sidebar_open(page)
+        info['sidebarAutoOpened'] = bool(open_info.get('auto_opened'))
+        if not opened:
+            info.update({
+                'status': 'open_failed',
+                'message': open_info.get('reason', 'Could not open sidebar'),
+                'topCandidates': match.get('topCandidates', [])
+            })
+            return False, info
+        state = get_sidebar_state(page)
+        match = match_sidebar_item(target_info.get('target_text', ''), state.get('items', []))
+        if match.get('ok') or match.get('status') == 'ambiguous':
+            info['is_sidebar_context'] = True
+
+    if not match.get('ok'):
+        info.update({
+            'status': match.get('status', 'no_match'),
+            'message': match.get('message', ''),
+            'topCandidates': match.get('topCandidates', [])
+        })
+        return False, info
+
+    candidate = match.get('candidate', {}) or {}
+    label_raw = candidate.get('label_raw', '')
+    xpaths = build_sidebar_click_xpaths(label_raw)
+    if not xpaths:
+        info.update({
+            'status': 'click_failed',
+            'message': f'No XPath candidates could be built for "{label_raw}"',
+            'topCandidates': match.get('topCandidates', [])
+        })
+        return False, info
+
+    chosen_xpath = None
+    last_error = ''
+    for xpath in xpaths:
+        try:
+            loc = page.locator(f"xpath={xpath}")
+            count = loc.count()
+            if count <= 0:
+                continue
+            for i in range(count):
+                row = loc.nth(i)
+                if row.is_visible():
+                    row.click(timeout=5000)
+                    chosen_xpath = xpath
+                    break
+            if chosen_xpath:
+                break
+        except Exception as e:
+            last_error = str(e)[:120]
+
+    if not chosen_xpath:
+        info.update({
+            'status': 'click_failed',
+            'message': f'Failed to click matched sidebar item "{label_raw}"' + (f' ({last_error})' if last_error else ''),
+            'topCandidates': match.get('topCandidates', [])
+        })
+        return False, info
+
+    # Persist deterministic click into generated script.
+    try:
+        init_script()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if step_text:
+            append_script_line(f"// step: {step_text}")
+        append_script_line(f"// {timestamp} click")
+        append_script_line(f"await page.click(`{js_safe('xpath=' + chosen_xpath)}`);")
+    except Exception as e:
+        print(f"[SIDEBAR] Warning: could not append deterministic click to script: {str(e)[:100]}")
+
+    info.update({
+        'status': 'clicked',
+        'locator': chosen_xpath,
+        'type': 'xpath',
+        'matchTier': match.get('matchTier'),
+        'matchScore': match.get('matchScore'),
+        'topCandidates': match.get('topCandidates', []),
+        'itemLabel': label_raw,
+    })
+    return True, info
+
 def try_fast_locator(page, step_description):
     """
     Try to find an element using common structural patterns BEFORE calling the LLM.
@@ -125,59 +776,74 @@ def try_fast_locator(page, step_description):
 
     Returns: (locator_string, locator_type) or (None, None) if no unique match.
     """
-    import re as _re
-
-    # Extract the likely target text from the step description
-    target_text = step_description.strip()
-
-    # Strip common action prefixes
-    target_text = _re.sub(
-        r'^(click\s+on|click|tap\s+on|tap|press|select|choose|open|expand|collapse|hover\s+over|hover)\s+',
-        '', target_text, flags=_re.IGNORECASE
-    ).strip()
-
-    # Strip surrounding quotes if present
-    if len(target_text) >= 2 and target_text[0] in ('"', "'") and target_text[-1] == target_text[0]:
-        target_text = target_text[1:-1]
+    target_info = extract_sidebar_target(step_description)
+    target_text = target_info.get('target_text') or _collapse_ws(step_description)
+    target_norm = target_info.get('normalized_target') or normalize_sidebar_text(target_text)
 
     if not target_text or len(target_text) < 2:
         return None, None
 
-    print(f"[FAST-LOCATOR] Trying fast path for: '{target_text}'")
+    print(f"[FAST-LOCATOR] Trying fast path for: '{target_text}' (normalized='{target_norm}')")
+
+    drawer_xpaths = []
+    if target_text:
+        drawer_xpaths.extend(build_sidebar_click_xpaths(target_text))
+
+    target_xpath_lit = xpath_literal(target_text)
+    testid_contains = (target_text.lower().replace(' ', '-'))
 
     # Generic structural XPath patterns (not app-specific)
     fast_xpaths = [
+        *drawer_xpaths,
         # aria-label exact match -> clickable ancestor (sidebar, nav items)
-        f"//div[@aria-label='{target_text}']/ancestor::div[@role='button']",
+        f"//div[@aria-label={target_xpath_lit}]/ancestor::div[@role='button']",
         # aria-label on a clickable element itself
-        f"//*[@aria-label='{target_text}'][@role='button' or self::button or self::a]",
+        f"//*[@aria-label={target_xpath_lit}][@role='button' or self::button or self::a]",
         # Span text exact match -> clickable ancestor (MUI list items)
-        f"//span[normalize-space(text())='{target_text}']/ancestor::div[@role='button']",
+        f"//span[normalize-space(text())={target_xpath_lit}]/ancestor::div[@role='button']",
         # Button with exact text
-        f"//button[normalize-space(.)='{target_text}']",
+        f"//button[normalize-space(.)={target_xpath_lit}]",
         # Link with exact text
-        f"//a[normalize-space(.)='{target_text}']",
+        f"//a[normalize-space(.)={target_xpath_lit}]",
         # Tab / role=tab
-        f"//*[@role='tab'][.//text()[normalize-space(.)='{target_text}']]",
+        f"//*[@role='tab'][.//text()[normalize-space(.)={target_xpath_lit}]]",
         # data-testid containing the text (case-insensitive)
-        f"//*[@data-testid and contains(translate(@data-testid,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), '{target_text.lower().replace(' ', '-')}')]",
+        f"//*[@data-testid and contains(translate(@data-testid,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), {xpath_literal(testid_contains)})]",
     ]
 
-    # For texts with special chars (& etc.), add contains() fallbacks
+    # For texts with special chars (& etc.), add contains() fallbacks.
     safe_text = target_text.split('&')[0].strip() if '&' in target_text else None
+    if not safe_text and target_norm:
+        safe_text = target_norm.split(' ')[0].strip() if ' ' in target_norm else target_norm
     if safe_text and len(safe_text) >= 3:
+        safe_lit = xpath_literal(safe_text)
         fast_xpaths.extend([
-            f"//div[contains(@aria-label,'{safe_text}')]/ancestor::div[@role='button']",
-            f"//span[contains(text(),'{safe_text}')]/ancestor::div[@role='button']",
+            f"//div[contains(@aria-label,{safe_lit})]/ancestor::div[@role='button']",
+            f"//span[contains(text(),{safe_lit})]/ancestor::div[@role='button']",
+            f"//*[contains(@class,'IvpLeftMenuDrawer')]//div[contains(@aria-label,{safe_lit})]/ancestor::div[@role='button'][1]",
+            f"//*[contains(@class,'IvpLeftMenuDrawer')]//span[contains(text(),{safe_lit})]/ancestor::div[@role='button'][1]",
         ])
 
     for xpath in fast_xpaths:
         try:
             loc = page.locator(f"xpath={xpath}")
             count = loc.count()
+            if count <= 0:
+                continue
+
             if count == 1 and loc.first.is_visible():
                 print(f"[FAST-LOCATOR] Found unique visible match: {xpath}")
                 return xpath, "xpath"
+
+            # Drawer-scoped selectors can be accepted when exactly one visible match exists.
+            if "IvpLeftMenuDrawer" in xpath or "testDrawer" in xpath:
+                visible_matches = 0
+                for i in range(count):
+                    if loc.nth(i).is_visible():
+                        visible_matches += 1
+                if visible_matches == 1:
+                    print(f"[FAST-LOCATOR] Found unique visible drawer match: {xpath}")
+                    return xpath, "xpath"
         except Exception:
             pass
 
@@ -209,7 +875,7 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
 ## CRITICAL RULES:
 1. Return ONLY ONE JSON object - NOT a list or array - this is MANDATORY
 2. DO NOT Use svg tags in the XPath directly. Instead, identify the purpose of the icon (e.g. menu, upload) and look for parent buttons or aria-labels or any other reliable thing that indicate its function.
-2. Focus on the PRIMARY element mentioned in the step (the one that will be acted upon first)
+   - Focus on the PRIMARY element mentioned in the step (the one that will be acted upon first)
 3. **PRIORITY**: Always look for and prioritize elements with `data-testid` attributes (very reliable)
 4. Return ONLY XPath locators (no CSS selectors)
 5. The XPath must be UNIQUE and reliable - it should match exactly ONE element
@@ -219,16 +885,20 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
    - Text content (exact or contains)
    - Combination of attributes for uniqueness
 7. Make the XPath specific enough that it won't match other similar elements
-8. **For SVGs and icons**: Identify the action/purpose, not just the visual. Look for parent buttons or aria-labels
-9. For hamburger icons or menu icons(svg), always return `//*[@data-testid='menu-icon']` if available. Only use fallbacks if not present.
-10. **For sidebar / navigation menu items** (e.g. "Click on Configure", "Click Challenge"):
+8. For text-driven nodes (`div`, `span`, `li`, `td`, `th`), use robust text predicates like:
+   - `normalize-space(text())='Exact Text'`
+   - `contains(normalize-space(.), 'Partial Text')`
+   Prefer `contains(normalize-space(.), ...)` when nested tags split text.
+9. **For SVGs and icons**: Identify the action/purpose, not just the visual. Look for parent buttons or aria-labels
+10. For hamburger icons or menu icons(svg), always return `//*[@data-testid='menu-icon']` if available. Only use fallbacks if not present.
+11. **For sidebar / navigation menu items** (e.g. "Click on Configure", "Click Challenge"):
    - These are typically list items in a drawer/sidebar with `aria-label` on the text container or visible text in a `<span>`.
    - Use `aria-label` attribute: `//div[@aria-label='Configure']/ancestor::div[@role='button']` 
    - Or use text content: `//span[normalize-space(text())='Configure']/ancestor::div[@role='button']`
    - ALWAYS target the nearest CLICKABLE ancestor element (`div[@role='button']`, `button`, or `a`) — NOT the inner text span itself.
    - If the text uses HTML entities (e.g., `&amp;`), use `contains()` with partial text rather than exact match: `//span[contains(text(),'Challenge')]/ancestor::div[@role='button']`
-11. **For elements with special characters in text** (like `&`, `<`, `>`): Use `contains()` with a safe substring instead of exact matching.
-12. When the step says "click on X" and X appears both in a sidebar menu AND elsewhere on the page, prefer the sidebar menu item (inside a drawer/nav/MuiList container).
+12. **For elements with special characters in text** (like `&`, `<`, `>`): Use `contains()` with a safe substring instead of exact matching.
+13. When the step says "click on X" and X appears both in a sidebar menu AND elsewhere on the page, prefer the sidebar menu item (inside a drawer/nav/MuiList container).
 {app_patterns_section}
 ## Example good XPaths (with data-testid priority):
    - //button[@data-testid='upload-button']
@@ -505,7 +1175,7 @@ def wait_for_loader(page):
 
 def get_page_dom_simple(page):
     """Get complete DOM snapshot including iframes and Shadow DOM for AI analysis.
-    Strips bloat (base64 images, SVG paths, long classes) to keep DOM small."""
+    Keeps structural/text context broad while trimming only obvious noise."""
     try:
         dom_snapshot = page.evaluate('''() => {
     function getVisibleDOMSnapshot() {
@@ -517,15 +1187,12 @@ def get_page_dom_simple(page):
                 let value = attr.value;
 
                 // Only keep useful attributes
-                if (!['id','class','name','data-testid','role','aria-label',
-                       'placeholder','title','href','type','tabindex','aria-selected',
-                       'aria-expanded','aria-haspopup','value'].includes(name)) {
+                if (!['id','class','name','data-testid','role','aria-label','aria-labelledby',
+                       'aria-describedby','aria-controls','aria-hidden','placeholder','title',
+                       'href','src','xlink:href','type','tabindex','aria-selected',
+                       'aria-expanded','aria-haspopup','value','for','alt','disabled',
+                       'readonly','checked','selected','colspan','rowspan'].includes(name)) {
                     continue;
-                }
-
-                // Truncate base64 data in src/href
-                if ((name === 'href') && value.startsWith('data:')) {
-                    value = '[base64-data]';
                 }
 
                 // Truncate very long class names (MUI classes can be 300+ chars)
@@ -552,20 +1219,7 @@ def get_page_dom_simple(page):
                 return '';
             }
 
-            // For img tags, strip base64 src
-            let extraAttrs = '';
-            if (tag === 'img') {
-                const src = node.getAttribute('src') || '';
-                const alt = node.getAttribute('alt') || '';
-                if (src.startsWith('data:')) {
-                    extraAttrs = ' src="[base64-image]"';
-                } else if (src) {
-                    extraAttrs = ` src="${src.length > 80 ? src.substring(0, 80) + '...' : src}"`;
-                }
-                if (alt) extraAttrs += ` alt="${alt}"`;
-            }
-
-            let output = `${indent}<${tag}${getAttributes(node)}${extraAttrs}>\n`;
+            let output = `${indent}<${tag}${getAttributes(node)}>\n`;
 
             // Shadow DOM
             if (node.shadowRoot) {
@@ -597,6 +1251,104 @@ def get_page_dom_simple(page):
     except Exception as e:
         print(f"[DOM Capture Error] {str(e)}")
         return str(e)
+
+
+def get_sidebar_dom_snapshot(page):
+    """
+    Capture a compact DOM snapshot focused on sidebar + active menu/listbox/popover surfaces.
+    This keeps LLM prompts small and relevant for sidebar locator fallback.
+    """
+    try:
+        sidebar_dom = page.evaluate('''() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                    return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const keepAttr = new Set([
+                'id', 'class', 'name', 'data-testid', 'role', 'aria-label',
+                'aria-labelledby', 'aria-describedby', 'aria-controls', 'aria-hidden',
+                'placeholder', 'title', 'type', 'aria-selected', 'aria-expanded',
+                'aria-haspopup', 'tabindex', 'value', 'href', 'src', 'xlink:href',
+                'for', 'alt', 'disabled', 'readonly', 'checked', 'selected',
+                'colspan', 'rowspan'
+            ]);
+
+            const sanitizeAttr = (name, value) => {
+                if (name === 'class' && value.length > 100) return value.substring(0, 100) + '...';
+                return value;
+            };
+
+            const getAttributes = (node) => {
+                if (!node.attributes) return '';
+                let attrs = '';
+                for (const attr of node.attributes) {
+                    const name = attr.name;
+                    if (!keepAttr.has(name)) continue;
+                    const value = sanitizeAttr(name, attr.value || '');
+                    attrs += ` ${name}="${value}"`;
+                }
+                return attrs;
+            };
+
+            const serializeNode = (node, indent = '') => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return '';
+                if (!isVisible(node)) return '';
+
+                const tag = node.tagName.toLowerCase();
+                if (['script', 'style', 'link', 'meta', 'noscript'].includes(tag)) return '';
+                if (['path', 'defs', 'g', 'clippath', 'mask', 'filter'].includes(tag)) return '';
+
+                let out = `${indent}<${tag}${getAttributes(node)}>` + '\\n';
+
+                for (const child of node.childNodes) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        const text = (child.nodeValue || '').trim().replace(/\\s+/g, ' ');
+                        if (text) {
+                            out += `${indent}  ${text}` + '\\n';
+                        }
+                    } else {
+                        out += serializeNode(child, indent + '  ');
+                    }
+                }
+
+                out += `${indent}</${tag}>` + '\\n';
+                return out;
+            };
+
+            const roots = [];
+            const drawerRoot =
+                document.querySelector('.IvpLeftMenuDrawer') ||
+                document.querySelector('[class*="IvpLeftMenuDrawer"]') ||
+                document.querySelector('[data-testid="testDrawer"]')?.closest('.MuiDrawer-root');
+
+            if (drawerRoot) roots.push(drawerRoot);
+
+            const popovers = Array.from(
+                document.querySelectorAll('[role="menu"], [role="listbox"], .MuiPopover-root, .MuiPopper-root')
+            ).filter(isVisible).slice(0, 6);
+            roots.push(...popovers);
+
+            return roots.map((root, idx) => {
+                const title = idx === 0 ? '## SIDEBAR ROOT' : `## ACTIVE OVERLAY ${idx}`;
+                return title + '\\n' + serializeNode(root);
+            }).join('\\n');
+        }''')
+
+        state = get_sidebar_state(page)
+        labels = [item.get('label_raw') for item in state.get('items', []) if item.get('label_raw')]
+        labels = list(dict.fromkeys(labels))
+        labels_blob = "## SIDEBAR LABELS:\n" + "\n".join(f"- {label}" for label in labels) if labels else "## SIDEBAR LABELS:\n- (none found)"
+
+        return labels_blob + "\n\n" + sidebar_dom
+    except Exception as e:
+        print(f"[SIDEBAR DOM] Error: {str(e)[:100]}")
+        return get_page_dom_simple(page)
 
 def extract_data_testid_summary(page):
     """Extract all elements with data-testid for quick reference"""
@@ -970,6 +1722,47 @@ def parse_natural_language_step(description):
     }
 
 
+MULTI_ACTION_VERB_RE = re.compile(
+    r'\b(?:click|select|choose|pick|open|expand|collapse|tap|press|hit|hover|double\s+click|right\s+click)\b',
+    flags=re.IGNORECASE
+)
+MULTI_ACTION_SPLIT_RE = re.compile(
+    r'\s+(?:and then|then|and)\s+(?=(?:click|select|choose|pick|open|expand|collapse|tap|press|hit|hover|double\s+click|right\s+click)\b)',
+    flags=re.IGNORECASE
+)
+
+
+def should_force_multi_action_split(description):
+    """Detect compound steps that contain multiple explicit action verbs."""
+    text = _collapse_ws(description or '')
+    if not text:
+        return False
+    lower = text.lower()
+    if (' and ' not in lower) and (' then ' not in lower):
+        return False
+    return len(MULTI_ACTION_VERB_RE.findall(text)) >= 2
+
+
+def heuristic_decompose_step(description):
+    """
+    Deterministic fallback decomposition for action chains like:
+    'Select A and Click B and Click C'.
+    """
+    text = _collapse_ws(description or '')
+    if not should_force_multi_action_split(text):
+        return [text] if text else [description]
+
+    parts = [p.strip(' ,.;') for p in MULTI_ACTION_SPLIT_RE.split(text) if p and p.strip(' ,.;')]
+    if len(parts) <= 1:
+        return [text]
+
+    # Keep only actionable segments; otherwise keep original to avoid bad rewrites.
+    if not all(MULTI_ACTION_VERB_RE.search(p) for p in parts):
+        return [text]
+
+    return parts
+
+
 def decompose_step_with_ai(description):
     """
     Use AI to decompose a compound natural language step into atomic sub-steps.
@@ -977,8 +1770,13 @@ def decompose_step_with_ai(description):
     
     Returns: list of step description strings
     """
+    heuristic_steps = heuristic_decompose_step(description)
+
     if not SECRET_KEY:
         print("[DECOMPOSE] Skipped: SECRET_KEY not configured")
+        if len(heuristic_steps) > 1:
+            print(f"[DECOMPOSE] Heuristic decomposition (no LLM): {heuristic_steps}")
+            return heuristic_steps
         return [description]
     
     try:
@@ -1164,14 +1962,24 @@ def decompose_step_with_ai(description):
                 if isinstance(sub_steps, list) and len(sub_steps) > 0:
                     sub_steps = [s.strip() for s in sub_steps if isinstance(s, str) and s.strip()]
                     if sub_steps:
+                        if len(sub_steps) == 1 and len(heuristic_steps) > 1:
+                            # Prevent false "single-click pass" for chained action instructions.
+                            print(f"[DECOMPOSE] Heuristic override for multi-action step: {heuristic_steps}")
+                            return heuristic_steps
                         print(f"[DECOMPOSE] Decomposed into {len(sub_steps)} sub-steps: {sub_steps}")
                         return sub_steps
         
         print(f"[DECOMPOSE] No decomposition needed, using original step")
+        if len(heuristic_steps) > 1:
+            print(f"[DECOMPOSE] Heuristic decomposition fallback: {heuristic_steps}")
+            return heuristic_steps
         return [description]
         
     except Exception as e:
         print(f"[DECOMPOSE] Error: {str(e)[:100]}, using original step")
+        if len(heuristic_steps) > 1:
+            print(f"[DECOMPOSE] Heuristic decomposition after error: {heuristic_steps}")
+            return heuristic_steps
         return [description]
 
 
@@ -1247,6 +2055,107 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
     network_logs = []
     console_logs = []
     page_created_here = False
+    last_dom_snapshot = None
+    last_dom_kind = None
+    last_dom_reason = ''
+    last_dom_marker = None
+    current_step_marker = None
+
+    def capture_and_store_dom(snapshot_kind='full', include_testid=True, reason=''):
+        """Capture DOM snapshot for diagnostics and LLM context reuse."""
+        nonlocal last_dom_snapshot, last_dom_kind, last_dom_reason, last_dom_marker
+        try:
+            raw_dom = get_sidebar_dom_snapshot(page) if snapshot_kind == 'sidebar' else get_page_dom_simple(page)
+            dom_payload = raw_dom
+            if include_testid:
+                testid_summary = extract_data_testid_summary(page)
+                dom_payload = testid_summary + "\n" + raw_dom if testid_summary else raw_dom
+
+            last_dom_snapshot = dom_payload
+            last_dom_kind = snapshot_kind
+            last_dom_reason = reason or ''
+            last_dom_marker = current_step_marker
+            print(f"[DOM] Captured {snapshot_kind} DOM" + (f" ({reason})" if reason else ""))
+            return dom_payload
+        except Exception as e:
+            err = f"[DOM Capture Error] {str(e)[:120]}"
+            print(err)
+            last_dom_snapshot = err
+            last_dom_kind = snapshot_kind
+            last_dom_reason = reason or 'capture-error'
+            last_dom_marker = current_step_marker
+            return None
+
+    def wait_for_dom_settle(timeout_ms=1800, quiet_ms=300, label=''):
+        """Wait briefly for delayed DOM mutations to settle."""
+        try:
+            info = page.evaluate(
+                '''async ({timeoutMs, quietMs}) => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return { changed: false, mutationCount: 0, timedOut: false };
+
+                    return await new Promise((resolve) => {
+                        let mutationCount = 0;
+                        let done = false;
+                        let quietTimer = null;
+                        let hardTimer = null;
+
+                        const finish = (timedOut = false) => {
+                            if (done) return;
+                            done = true;
+                            if (quietTimer) clearTimeout(quietTimer);
+                            if (hardTimer) clearTimeout(hardTimer);
+                            observer.disconnect();
+                            resolve({
+                                changed: mutationCount > 0,
+                                mutationCount,
+                                timedOut
+                            });
+                        };
+
+                        const onMutation = (mutations) => {
+                            mutationCount += (mutations || []).length;
+                            if (quietTimer) clearTimeout(quietTimer);
+                            quietTimer = setTimeout(() => finish(false), quietMs);
+                        };
+
+                        const observer = new MutationObserver(onMutation);
+                        observer.observe(root, {
+                            subtree: true,
+                            childList: true,
+                            attributes: true,
+                            characterData: true
+                        });
+
+                        // If no mutations occur, settle quickly.
+                        quietTimer = setTimeout(() => finish(false), quietMs);
+                        hardTimer = setTimeout(() => finish(true), timeoutMs);
+                    });
+                }''',
+                {'timeoutMs': int(timeout_ms), 'quietMs': int(quiet_ms)}
+            )
+            info = info or {}
+            print(
+                f"[DOM] Settle check{f' ({label})' if label else ''}: "
+                f"changed={bool(info.get('changed'))}, "
+                f"mutations={int(info.get('mutationCount') or 0)}, "
+                f"timedOut={bool(info.get('timedOut'))}"
+            )
+            return info
+        except Exception as e:
+            print(f"[DOM] Settle check failed{f' ({label})' if label else ''}: {str(e)[:120]}")
+            return {'changed': False, 'mutationCount': 0, 'timedOut': True}
+
+    def refresh_dom_after_click(reason_prefix):
+        """
+        Capture DOM immediately after click, then recapture if delayed mutations appear.
+        Latest capture overwrites older snapshot so stale DOM is discarded.
+        """
+        capture_and_store_dom('full', include_testid=True, reason=f'{reason_prefix}-initial')
+        settle_info = wait_for_dom_settle(timeout_ms=2500, quiet_ms=300, label=reason_prefix)
+        if settle_info.get('changed'):
+            capture_and_store_dom('full', include_testid=True, reason=f'{reason_prefix}-after-mutation')
+            print(f"[DOM] Refreshed post-click DOM after delayed mutations ({reason_prefix})")
     
     try:
         # Reuse page if provided, otherwise create new page
@@ -1354,6 +2263,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                 
                 # Use the sub-step description for parsing and execution
                 description_for_exec = sub_step_desc
+                current_step_marker = f"{idx}:{sub_idx}"
                 
                 # Parse the (sub-)step
                 if not raw_action and sub_step_desc:
@@ -1435,9 +2345,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         print(f"[EXECUTE] Action 'drag' - Waiting for page to be ready...")
                         wait_for_loader(page)
                         print(f"[EXECUTE] Capturing DOM...")
-                        dom = get_page_dom_simple(page)
-                        testid_summary = extract_data_testid_summary(page)
-                        dom = testid_summary + "\n" + dom if testid_summary else dom
+                        dom = capture_and_store_dom('full', include_testid=True, reason='drag-locator')
                         
                         # Find source element
                         source_desc = search_text
@@ -1483,15 +2391,10 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         # For ALL interactive actions, wait for loader first
                         print(f"[EXECUTE] Action '{action}' - Waiting for page to be ready...")
                         wait_for_loader(page)
-                        
-                        # Get DOM and send to LLM
-                        print(f"[EXECUTE] Capturing DOM...")
-                        dom = get_page_dom_simple(page)
-                        # Include data-testid summary for better element finding
-                        testid_summary = extract_data_testid_summary(page)
-                        dom = testid_summary + "\n" + dom if testid_summary else dom
-                        print(f"[EXECUTE] DOM captured, sending to LLM for locator...")
-                        
+                        if action == 'click':
+                            # Allow previous click-triggered async UI changes to materialize.
+                            wait_for_dom_settle(timeout_ms=1500, quiet_ms=250, label='pre-click-locator')
+
                         if action == 'press':
                             # Press action doesn't need LLM locator, but still gets DOM for context
                             key = str(value) if value else 'Enter'
@@ -1528,56 +2431,154 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 action_failed = True
                         
                         else:
-                            # Try fast structural locator first (no LLM needed)
-                            locator, locator_type = try_fast_locator(page, description_for_exec or search_text)
+                            sidebar_info = None
+                            action_handled = False
 
-                            # Fall back to LLM if fast-path didn't find a unique match
-                            if not locator:
-                                locator, locator_type = get_locator_from_ai(dom, description_for_exec or search_text)
-                            
-                            if not locator:
-                                error_msg = f'LLM could not find locator for: "{description_for_exec or search_text}"'
-                                print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
-                                results.append({'step': idx, 'description': description_for_exec, 'action': action, 'ok': False, 'error': error_msg})
-                                action_failed = True
-                            else:
-                                # Got locator from LLM, now perform the action
-                                print(f"[EXECUTE] Got locator: {locator} (type: {locator_type})")
-                                print(f"[EXECUTE] Performing action: {action}...")
-                                
-                                success, error = use_locator(page, locator, locator_type, action, value, step_description=description_for_exec)
-                                
-                                if success:
-                                    # After click/interactive action, wait for any loaders
-                                    if action in ('click', 'hover', 'dblclick', 'rightclick'):
-                                        print(f"[EXECUTE] {action.title()} executed, waiting for page to settle...")
-                                        wait_for_loader(page)
-                                    
+                            # 1) Deterministic sidebar resolver first for click actions.
+                            if action == 'click':
+                                print("[EXECUTE] Trying deterministic sidebar resolver...")
+                                sidebar_ok, sidebar_info = click_sidebar_target(page, description_for_exec or search_text)
+                                if sidebar_ok:
+                                    locator = sidebar_info.get('locator')
+                                    locator_type = sidebar_info.get('type', 'xpath')
+                                    print(f"[EXECUTE] Sidebar resolver clicked: {locator}")
+
+                                    wait_for_loader(page)
+                                    refresh_dom_after_click('post-click-sidebar-deterministic')
                                     results.append({
-                                        'step': idx, 
+                                        'step': idx,
                                         'description': description_for_exec,
-                                        'action': action, 
-                                        'ok': True, 
-                                        'locator': locator, 
-                                        'type': locator_type,
-                                        'value': str(value)[:50] if value else None
-                                    })
-                                    print(f"[EXECUTE] SUCCESS: {description_for_exec}")
-                                    
-                                    # Get new DOM after action (for next step to see updated page)
-                                    print(f"[EXECUTE] Getting DOM after action...")
-                                else:
-                                    results.append({
-                                        'step': idx, 
-                                        'description': description_for_exec,
-                                        'action': action, 
-                                        'ok': False, 
-                                        'error': error,
+                                        'action': action,
+                                        'ok': True,
                                         'locator': locator,
-                                        'type': locator_type
+                                        'type': locator_type,
+                                        'value': str(value)[:50] if value else None,
+                                        'resolver': 'sidebar-deterministic',
+                                        'matchTier': sidebar_info.get('matchTier'),
+                                        'matchScore': sidebar_info.get('matchScore'),
+                                        'sidebarAutoOpened': sidebar_info.get('sidebarAutoOpened', False),
                                     })
-                                    print(f"[EXECUTE] FAILED: {description_for_exec} - {error}")
+                                    print(f"[EXECUTE] SUCCESS: {description_for_exec} (sidebar-deterministic)")
+                                    action_handled = True
+                                elif sidebar_info and sidebar_info.get('status') == 'ambiguous':
+                                    # For ambiguous sidebar targets, fail explicitly to avoid wrong clicks.
+                                    candidates = sidebar_info.get('topCandidates') or []
+                                    candidate_blob = ", ".join(
+                                        f"{c.get('label')}({c.get('score')})" for c in candidates
+                                    ) if candidates else "none"
+                                    error_msg = (
+                                        f'Sidebar target is ambiguous for "{description_for_exec}". '
+                                        f'Candidates: {candidate_blob}'
+                                    )
+                                    print(f"[EXECUTE] FAILED: {error_msg}")
+                                    results.append({
+                                        'step': idx,
+                                        'description': description_for_exec,
+                                        'action': action,
+                                        'ok': False,
+                                        'error': error_msg,
+                                        'resolver': 'sidebar-deterministic',
+                                        'matchTier': sidebar_info.get('matchTier'),
+                                        'matchScore': sidebar_info.get('matchScore'),
+                                        'sidebarAutoOpened': sidebar_info.get('sidebarAutoOpened', False),
+                                    })
                                     action_failed = True
+                                    action_handled = True
+                                elif sidebar_info:
+                                    print(
+                                        f"[EXECUTE] Sidebar resolver fallback: "
+                                        f"status={sidebar_info.get('status')} reason={sidebar_info.get('message', '')}"
+                                    )
+
+                            if not action_handled and not action_failed:
+                                resolver = 'llm'
+                                locator, locator_type = None, None
+
+                                # 2) Fast structural resolver is sidebar-only.
+                                use_fast_sidebar = (
+                                    action == 'click'
+                                    and sidebar_info
+                                    and sidebar_info.get('is_sidebar_context')
+                                )
+                                if use_fast_sidebar:
+                                    resolver = 'fast-locator'
+                                    locator, locator_type = try_fast_locator(page, description_for_exec or search_text)
+
+                                # 3) LLM remains the main locator path.
+                                if not locator:
+                                    resolver = 'llm'
+                                    print(f"[EXECUTE] Capturing DOM for LLM locator...")
+                                    if action == 'click' and sidebar_info and sidebar_info.get('is_sidebar_context'):
+                                        print("[EXECUTE] Using sidebar-focused DOM snapshot for LLM fallback")
+                                        dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar')
+                                    else:
+                                        print("[EXECUTE] Using full-page DOM snapshot for LLM fallback")
+                                        dom = capture_and_store_dom('full', include_testid=True, reason='llm-full')
+
+                                    locator, locator_type = get_locator_from_ai(dom or '', description_for_exec or search_text)
+
+                                if not locator:
+                                    error_msg = f'Could not find locator for: "{description_for_exec or search_text}"'
+                                    print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
+                                    results.append({
+                                        'step': idx,
+                                        'description': description_for_exec,
+                                        'action': action,
+                                        'ok': False,
+                                        'error': error_msg,
+                                        'resolver': resolver,
+                                        'sidebarAutoOpened': (sidebar_info.get('sidebarAutoOpened') if sidebar_info else False),
+                                    })
+                                    action_failed = True
+                                else:
+                                    # Got locator from fast resolver or LLM, now perform the action
+                                    print(f"[EXECUTE] Got locator: {locator} (type: {locator_type}, resolver: {resolver})")
+                                    print(f"[EXECUTE] Performing action: {action}...")
+
+                                    success, error = use_locator(
+                                        page, locator, locator_type, action, value, step_description=description_for_exec
+                                    )
+
+                                    if success:
+                                        # After click/interactive action, wait for any loaders
+                                        if action in ('click', 'hover', 'dblclick', 'rightclick'):
+                                            print(f"[EXECUTE] {action.title()} executed, waiting for page to settle...")
+                                            wait_for_loader(page)
+                                        if action == 'click':
+                                            refresh_dom_after_click(f'post-click-{resolver}')
+                                        elif action in ('dblclick', 'rightclick'):
+                                            capture_and_store_dom(
+                                                'full',
+                                                include_testid=True,
+                                                reason=f'post-{action}-{resolver}'
+                                            )
+
+                                        results.append({
+                                            'step': idx,
+                                            'description': description_for_exec,
+                                            'action': action,
+                                            'ok': True,
+                                            'locator': locator,
+                                            'type': locator_type,
+                                            'value': str(value)[:50] if value else None,
+                                            'resolver': resolver,
+                                            'sidebarAutoOpened': (sidebar_info.get('sidebarAutoOpened') if sidebar_info else False),
+                                        })
+                                        print(f"[EXECUTE] SUCCESS: {description_for_exec}")
+                                    else:
+                                        results.append({
+                                            'step': idx,
+                                            'description': description_for_exec,
+                                            'action': action,
+                                            'ok': False,
+                                            'error': error,
+                                            'locator': locator,
+                                            'type': locator_type,
+                                            'resolver': resolver,
+                                            'sidebarAutoOpened': (sidebar_info.get('sidebarAutoOpened') if sidebar_info else False),
+                                        })
+                                        print(f"[EXECUTE] FAILED: {description_for_exec} - {error}")
+                                        action_failed = True
                     
                     else:
                         result_item = {'step': idx, 'description': description_for_exec, 'action': action, 'ok': False, 'error': f'Unknown action: {action}'}
@@ -1594,7 +2595,26 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                     print(f"[EXECUTE] EXCEPTION: {error_msg}")
                     results.append({'step': idx, 'description': description_for_exec if 'description_for_exec' in locals() else '', 'action': action if 'action' in locals() else '', 'ok': False, 'error': error_msg})
                     action_failed = True
-                
+
+                if action_failed:
+                    # Ensure latest DOM snapshot is persisted to debug log for this failed step.
+                    if last_dom_marker != current_step_marker:
+                        capture_and_store_dom('full', include_testid=True, reason='failure-step-final')
+                    if results and results[-1].get('ok') is False:
+                        if last_dom_snapshot:
+                            debug_block = (
+                                "\n[FAILED_STEP_DOM]\n"
+                                f"step_index={idx}\n"
+                                f"sub_step_index={sub_idx}\n"
+                                f"description={description_for_exec if 'description_for_exec' in locals() else ''}\n"
+                                f"action={action if 'action' in locals() else ''}\n"
+                                f"dom_kind={last_dom_kind}\n"
+                                f"dom_reason={last_dom_reason}\n"
+                                f"{last_dom_snapshot}\n"
+                                "[END_FAILED_STEP_DOM]\n"
+                            )
+                            append_debug_log(job_id, debug_block)
+ 
                 # STOP SUB-STEP EXECUTION IF FAILED
                 if action_failed:
                     print(f"[EXECUTE] Sub-step failed - stopping execution")

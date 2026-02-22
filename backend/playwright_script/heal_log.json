@@ -1,0 +1,258 @@
+[
+  {
+    "timestamp": "2026-02-18T12:08:13.004397",
+    "script": "test_20260218_120057.spec.js",
+    "step": 4,
+    "description": "2026-02-18 12:01:16 click",
+    "old_locator": "xpath=//div[@id='secti-client']//div[normalize-space(.)='pmqaautomationuat']",
+    "new_locator": "xpath=//div[@id='section-client']//div[normalize-space(.)='pmqaautomationuat']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:25.956116",
+    "script": "test_20260218_120057.spec.js",
+    "step": 5,
+    "description": "2026-02-18 12:01:22 click",
+    "old_locator": "xpath=//input[@id='subm-button']",
+    "new_locator": "xpath=//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:39.072979",
+    "script": "test_20260218_120057.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:01:28 click",
+    "old_locator": "xpath=//input[@id='passrd']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:51.608654",
+    "script": "test_20260218_120057.spec.js",
+    "step": 7,
+    "description": "2026-02-18 12:01:32 fill",
+    "old_locator": "xpath=//input[@id='pass']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T13:00:47.559127",
+    "script": "test_20260218_122839.spec.js",
+    "step": 3,
+    "description": "2026-02-18 12:28:53 click",
+    "old_locator": "xpath=//input[@id='cent-dropdown']",
+    "new_locator": "xpath=//input[@id='client-dropdown']"
+  },
+  {
+    "timestamp": "2026-02-18T13:00:54.562013",
+    "script": "test_20260218_122839.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:29:17 click",
+    "old_locator": "xpath=//inppassword']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T13:00:59.473389",
+    "script": "test_20260218_122839.spec.js",
+    "step": 7,
+    "description": "2026-02-18 12:29:21 fill",
+    "old_locator": "xpath=//form@id='form-login']//input[@id='password']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T13:01:04.291438",
+    "script": "test_20260218_122839.spec.js",
+    "step": 8,
+    "description": "2026-02-18 12:29:28 click",
+    "old_locator": "xpath=//form[@id=m-login']//input[@id='submit-button']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T13:01:18.685764",
+    "script": "test_20260218_122839.spec.js",
+    "step": 9,
+    "description": "2026-02-18 12:29:49 click",
+    "old_locator": "xpath=//header[@datid='header']//button[@role='tab'][.//*[@aria-label='Pricing Blotter']]",
+    "new_locator": "xpath=//header[@data-testid='header']//button[@role='tab'][.//*[@aria-label='Pricing Blotter']]"
+  },
+  {
+    "timestamp": "2026-02-18T13:21:52.339737",
+    "script": "test_20260218_122839.spec.js",
+    "step": 2,
+    "description": "2026-02-18 12:28:44 fill",
+    "old_locator": "xpath=//input[@name']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-18T13:21:59.839229",
+    "script": "test_20260218_122839.spec.js",
+    "step": 5,
+    "description": "2026-02-18 12:29:09 click",
+    "old_locator": "xpath=//inpubmit-button']",
+    "new_locator": "xpath=//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T13:22:04.367580",
+    "script": "test_20260218_122839.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:29:17 click",
+    "old_locator": "xpath=//in'password']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T13:22:17.562826",
+    "script": "test_20260218_122839.spec.js",
+    "step": 8,
+    "description": "2026-02-18 12:29:28 click",
+    "old_locator": "xpath=//form[@id='n']//input[@id='submit-button']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T13:22:34.061826",
+    "script": "test_20260218_122839.spec.js",
+    "step": 9,
+    "description": "2026-02-18 12:29:49 click",
+    "old_locator": "xpath=//header[@dd='header']//button[@role='tab'][.//*[@aria-label='Pricing Blotter']]",
+    "new_locator": "xpath=//header[@data-testid='header']//button[@role='tab' and @id='tabControlTabName-IVPPriceMaster/Blotter']"
+  },
+  {
+    "timestamp": "2026-02-18T19:21:13.614765",
+    "script": "test_20260218_122839.spec.js",
+    "step": 4,
+    "description": "2026-02-18 12:29:01 click",
+    "old_locator": "xpath=//div[@id='-client']//div[normalize-space(text())='pmqaautomationuat']",
+    "new_locator": "xpath=//input[@id='client-dropdown']"
+  },
+  {
+    "timestamp": "2026-02-18T19:21:20.138921",
+    "script": "test_20260218_122839.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:29:17 click",
+    "old_locator": "xpath=//input[@assword']",
+    "new_locator": "xpath=//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T19:22:02.425175",
+    "script": "test_20260218_122839.spec.js",
+    "step": 7,
+    "description": "2026-02-18 12:29:21 fill",
+    "old_locator": "xpath=//form[@id='form-lsword']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-18T19:25:49.458785",
+    "script": "test_20260218_122839.spec.js",
+    "step": 4,
+    "description": "2026-02-18 12:29:01 click",
+    "old_locator": "xpath=//inpu]",
+    "new_locator": "xpath=//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T19:27:30.474086",
+    "script": "test_20260218_122839.spec.js",
+    "step": 4,
+    "description": "2026-02-18 12:29:01 click",
+    "old_locator": "xpath=//input[@']",
+    "new_locator": "xpath=//input[@id='submit-button' and @name='login']"
+  },
+  {
+    "timestamp": "2026-02-18T19:27:34.587035",
+    "script": "test_20260218_122839.spec.js",
+    "step": 5,
+    "description": "2026-02-18 12:29:09 click",
+    "old_locator": "xpath=//inputbmit-button']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T19:27:40.057289",
+    "script": "test_20260218_122839.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:29:17 click",
+    "old_locator": "xpath=//inputubmit-button']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T19:30:57.993376",
+    "script": "test_20260218_192828.spec.js",
+    "step": 3,
+    "description": "2026-02-18 19:28:42 click",
+    "old_locator": "xpath=//form[@id='form-login='client-dropdown']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T19:31:03.553525",
+    "script": "test_20260218_192828.spec.js",
+    "step": 4,
+    "description": "2026-02-18 19:28:53 click",
+    "old_locator": "xpath=//div[@id='section-client']//div[conox-root') and normalize-space(.)='pmqaautomationuat']",
+    "new_locator": "xpath=//div[@id='section-client']//input[@id='client-dropdown']"
+  },
+  {
+    "timestamp": "2026-02-18T19:31:08.864058",
+    "script": "test_20260218_192828.spec.js",
+    "step": 5,
+    "description": "2026-02-18 19:29:02 click",
+    "old_locator": "xpath=//form[@id='form-login']/[@id='submit-button']",
+    "new_locator": "xpath=//form[@id='form-login']//input[@id='submit-button' and @name='login']"
+  },
+  {
+    "timestamp": "2026-02-19T09:14:33.755535",
+    "script": "test_20260219_091001.spec.js",
+    "step": 1,
+    "description": "2026-02-19 09:10:01 click",
+    "old_locator": "xpath=//input[@id='usrname']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-19T09:14:45.839713",
+    "script": "test_20260219_091001.spec.js",
+    "step": 2,
+    "description": "2026-02-19 09:10:04 fill",
+    "old_locator": "xpath=//input[@id='userne']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-19T09:14:57.331434",
+    "script": "test_20260219_091001.spec.js",
+    "step": 3,
+    "description": "2026-02-19 09:10:12 click",
+    "old_locator": "xpath=//input[@id='client-dpdown']",
+    "new_locator": "xpath=//input[@id='client-dropdown']"
+  },
+  {
+    "timestamp": "2026-02-19T09:15:56.482014",
+    "script": "test_20260219_091001.spec.js",
+    "step": 2,
+    "description": "2026-02-19 09:10:04 fill",
+    "old_locator": "xpath=//div[@id='username']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-20T14:00:04.327295",
+    "script": "test_20260220_135429.spec.js",
+    "step": 9,
+    "description": "2026-02-20 13:55:35 click",
+    "old_locator": "xpath=//button[@role='tab78' and @id='tabControlTabName-IVPPriceMaster/Blotter']",
+    "new_locator": "xpath=//div[@aria-label='Pricing Blotter']/ancestor::button[@role='tab']"
+  },
+  {
+    "timestamp": "2026-02-20T14:00:39.039592",
+    "script": "test_20260220_135429.spec.js",
+    "step": 10,
+    "description": "2026-02-20 13:56:04 click",
+    "old_locator": "xpath=//*[@data-testid='mu-icon']",
+    "new_locator": "xpath=//*[@data-testid='menu-icon']"
+  },
+  {
+    "timestamp": "2026-02-20T15:02:28.561230",
+    "script": "test_20260219_100511.spec.js",
+    "step": 6,
+    "description": "2026-02-19 10:05:49 click",
+    "old_locator": "xpath=//input[@id='password123']",
+    "new_locator": "xpath=//input[@id='password' and @type='password']"
+  },
+  {
+    "timestamp": "2026-02-20T15:03:11.567212",
+    "script": "test_20260219_100511.spec.js",
+    "step": 10,
+    "description": "2026-02-19 10:06:44 click",
+    "old_locator": "xpath=//*[@data-testid='menu-']",
+    "new_locator": "xpath=//*[@data-testid='menu-icon']"
+  }
+]
