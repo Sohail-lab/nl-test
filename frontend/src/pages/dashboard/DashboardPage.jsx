@@ -1,4 +1,17 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Activity,
+  CheckCircle2,
+  Clock3,
+  FileSpreadsheet,
+  Globe,
+  Loader2,
+  PlayCircle,
+  RefreshCcw,
+  StopCircle,
+  UploadCloud,
+  XCircle,
+} from "lucide-react";
 import { DashboardLayout } from "../../components/layout/DashboardLayout";
 import { Card } from "../../components/ui/card";
 import { Button } from "../../components/ui/button";
@@ -12,37 +25,33 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null); // pending, running, completed, failed
+  const [jobStatus, setJobStatus] = useState(null);
   const [result, setResult] = useState(null);
-  const [progress, setProgress] = useState(null); // Progress tracking
+  const [progress, setProgress] = useState(null);
   const fileInputRef = useRef();
   const pollIntervalRef = useRef(null);
 
-  // Poll job status and progress every 500ms
   useEffect(() => {
     if (!jobId) return;
 
     const pollStatus = async () => {
       try {
-        // Poll job status
         const statusRes = await fetch(`${API}/jobs/${jobId}`);
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           setJobStatus(statusData.status);
 
-          // Poll progress
           try {
             const progressRes = await fetch(`${API}/jobs-progress/${jobId}`);
             if (progressRes.ok) {
               const progressData = await progressRes.json();
               setProgress(progressData);
             }
-          } catch (e) {
-            // Progress might not be available yet
+          } catch {
+            // Progress can be unavailable at startup.
           }
 
-          if (statusData.status === 'completed' || statusData.status === 'failed') {
-            // Job is done, fetch result
+          if (statusData.status === "completed" || statusData.status === "failed") {
             try {
               const resultRes = await fetch(`${API}/jobs-result/${jobId}`);
               if (resultRes.ok) {
@@ -52,17 +61,16 @@ export default function DashboardPage() {
                 if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
               }
             } catch (e) {
-              console.error('Failed to fetch result:', e);
+              console.error("Failed to fetch result:", e);
               setLoading(false);
             }
           }
         }
       } catch (e) {
-        console.error('Failed to poll status:', e);
+        console.error("Failed to poll status:", e);
       }
     };
 
-    // Poll immediately and then every 500ms for faster updates
     pollStatus();
     pollIntervalRef.current = setInterval(pollStatus, 500);
 
@@ -71,7 +79,6 @@ export default function DashboardPage() {
     };
   }, [jobId]);
 
-  // Handle file selection via input or drop
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
     if (selectedFile) setFile(selectedFile);
@@ -87,7 +94,6 @@ export default function DashboardPage() {
 
   const handleDragOver = (e) => e.preventDefault();
 
-  // Handle stopping the test
   const handleStop = async () => {
     if (!jobId) return;
 
@@ -102,15 +108,14 @@ export default function DashboardPage() {
         setMessage("Failed to send stop signal.");
       }
     } catch (e) {
-      console.error('Failed to send stop signal:', e);
+      console.error("Failed to send stop signal:", e);
       setMessage("Error sending stop signal.");
     }
   };
 
-  // Handle file upload and execution
   const handleUpload = async () => {
-    if (!file) return setMessage("Please select an Excel file first!");
-    if (!websiteUrl) return setMessage("Please enter a website URL!");
+    if (!file) return setMessage("Please select an Excel file first.");
+    if (!websiteUrl) return setMessage("Please enter a website URL.");
 
     const formData = new FormData();
     formData.append("testFile", file);
@@ -121,6 +126,7 @@ export default function DashboardPage() {
     setJobId(null);
     setJobStatus(null);
     setResult(null);
+    setProgress(null);
 
     try {
       const res = await fetch(`${API}/upload-test`, {
@@ -136,7 +142,7 @@ export default function DashboardPage() {
         setMessage(`Job created: ${data.jobId}. Processing...`);
       } else {
         setLoading(false);
-        setMessage(`Error: ${data.error || 'Unknown error'}`);
+        setMessage(`Error: ${data.error || "Unknown error"}`);
       }
     } catch (err) {
       console.error(err);
@@ -151,260 +157,393 @@ export default function DashboardPage() {
     setJobId(null);
     setJobStatus(null);
     setResult(null);
+    setProgress(null);
     setMessage("");
     setLoading(false);
   };
 
+  const statusTone = {
+    completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    failed: "bg-rose-50 text-rose-700 border-rose-200",
+    running: "bg-sky-50 text-sky-700 border-sky-200",
+    pending: "bg-slate-100 text-slate-700 border-slate-200",
+  };
+  const isTerminalStatus = jobStatus === "completed" || jobStatus === "failed";
+  const completedCount = progress?.completedSteps?.length || 0;
+  const failedCount = progress?.failedSteps?.length || 0;
+  const completionPercent =
+    progress?.totalSteps > 0
+      ? Math.round((progress.currentStep / progress.totalSteps) * 100)
+      : 0;
+  const remainingSteps = progress
+    ? Math.max(progress.totalSteps - (completedCount + failedCount), 0)
+    : 0;
+  const isMessageError = /error|failed/i.test(message);
+
   return (
     <DashboardLayout>
-      <div className="space-y-6 max-w-4xl mx-auto">
-        <h2 className="text-2xl font-bold">Upload Test Excel</h2>
+      <div className="mx-auto max-w-5xl space-y-6">
+        <section className="rounded-3xl border border-sky-100 bg-gradient-to-r from-sky-50 via-cyan-50 to-blue-50 p-6 shadow-sm">
+          <p className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-sky-700">
+            <Activity className="h-3.5 w-3.5" />
+            Test Orchestration
+          </p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">
+            Launch Web Automation from Excel Scenarios
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm text-slate-600">
+            Provide your target website and upload an Excel suite. The system will
+            execute your workflow and stream job progress, step outcomes, and final
+            diagnostics here.
+          </p>
+        </section>
 
-        {/* Upload Form */}
         {!jobId && (
-          <Card className="p-6 flex flex-col gap-4 items-start">
-            {/* Website URL */}
-            <Input
-              placeholder="Enter website URL (e.g., https://example.com)"
-              value={websiteUrl}
-              onChange={(e) => setWebsiteUrl(e.target.value)}
-              className="w-full"
-            />
+          <Card className="p-6 sm:p-8">
+            <div className="space-y-6">
+              <div>
+                <label className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <Globe className="h-4 w-4 text-sky-600" />
+                  Target Website URL
+                </label>
+                <Input
+                  placeholder="https://example.com"
+                  value={websiteUrl}
+                  onChange={(e) => setWebsiteUrl(e.target.value)}
+                  className="w-full"
+                />
+              </div>
 
-            {/* File input with drag & drop */}
-            <div
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              className="w-full border-2 border-dashed border-gray-300 rounded p-6 text-center cursor-pointer hover:border-blue-600"
-              onClick={() => fileInputRef.current.click()}
-            >
-              {file ? (
-                <p>Selected file: <strong>{file.name}</strong></p>
-              ) : (
-                <p>Drag & drop an Excel file here or click to select</p>
-              )}
-              <input
-                type="file"
-                accept=".xls,.xlsx"
-                ref={fileInputRef}
-                onChange={handleFileChange}
-                className="hidden"
-              />
+              <div>
+                <label className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <FileSpreadsheet className="h-4 w-4 text-sky-600" />
+                  Excel Test File
+                </label>
+                <div
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onClick={() => fileInputRef.current.click()}
+                  className="cursor-pointer rounded-2xl border-2 border-dashed border-sky-200 bg-sky-50/50 p-8 text-center transition hover:border-sky-400 hover:bg-sky-50"
+                >
+                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-white text-sky-600 shadow-sm">
+                    <UploadCloud className="h-6 w-6" />
+                  </div>
+                  {file ? (
+                    <p className="text-sm font-semibold text-slate-800">
+                      Selected file: <span className="text-sky-700">{file.name}</span>
+                    </p>
+                  ) : (
+                    <p className="text-sm text-slate-600">
+                      Drag and drop an Excel file here, or click to select.
+                    </p>
+                  )}
+
+                  <input
+                    type="file"
+                    accept=".xls,.xlsx"
+                    ref={fileInputRef}
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button onClick={handleUpload} disabled={loading} className="min-w-44">
+                  {loading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Uploading...
+                    </>
+                  ) : (
+                    <>
+                      <PlayCircle className="h-4 w-4" />
+                      Upload & Execute
+                    </>
+                  )}
+                </Button>
+
+                {message && (
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      isMessageError
+                        ? "bg-rose-50 text-rose-700"
+                        : "bg-emerald-50 text-emerald-700"
+                    }`}
+                  >
+                    {message}
+                  </span>
+                )}
+              </div>
             </div>
-
-            {/* Upload Button */}
-            <Button
-              onClick={handleUpload}
-              disabled={loading}
-              className="bg-blue-600 text-white mt-2"
-            >
-              {loading ? "Uploading..." : "Upload & Execute"}
-            </Button>
-
-            {/* Message */}
-            {message && (
-              <p className={`mt-2 font-medium ${message.includes('Error') ? 'text-red-600' : 'text-green-600'}`}>
-                {message}
-              </p>
-            )}
           </Card>
         )}
 
-        {/* Stop Button (during execution) */}
-        {jobId && jobStatus === 'running' && (
-          <div className="flex gap-2">
-            <Button
-              onClick={handleStop}
-              className="bg-red-600 hover:bg-red-700 text-white"
-            >
-              ⏹ Stop Test
-            </Button>
-            <Button
-              onClick={resetForm}
-              className="bg-gray-500 hover:bg-gray-600 text-white"
-            >
-              Reset
-            </Button>
-          </div>
-        )}
-
-        {/* Job Status Card */}
         {jobId && (
-          <Card className="p-6 flex flex-col gap-4">
-            <h3 className="text-lg font-bold">Job Status</h3>
-            <div className="space-y-2">
-              <p>
-                <strong>Job ID:</strong> <code className="bg-gray-100 px-2 py-1 rounded">{jobId}</code>
-              </p>
-              <p>
-                <strong>Status:</strong>{" "}
-                <span className={`px-2 py-1 rounded font-medium ${
-                  jobStatus === 'completed' ? 'bg-green-100 text-green-800' :
-                  jobStatus === 'failed' ? 'bg-red-100 text-red-800' :
-                  jobStatus === 'running' ? 'bg-blue-100 text-blue-800' :
-                  'bg-gray-100 text-gray-800'
-                }`}>
-                  {jobStatus || 'pending'}
-                </span>
-              </p>
+          <Card className="overflow-hidden p-0">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/60 p-6">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Live Job Status</h3>
+                <p className="text-sm text-slate-600">
+                  Track run state, progress, and detailed step results.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {jobStatus === "running" && (
+                  <Button onClick={handleStop} variant="destructive">
+                    <StopCircle className="h-4 w-4" />
+                    Stop Test
+                  </Button>
+                )}
+                <Button onClick={resetForm} variant="outline">
+                  <RefreshCcw className="h-4 w-4" />
+                  Start New Job
+                </Button>
+              </div>
             </div>
 
-            {jobStatus !== 'completed' && jobStatus !== 'failed' && (
-              <div className="mt-4 p-4 bg-blue-50 rounded border border-blue-200">
-                <h4 className="font-bold mb-3 text-blue-900">Execution Progress</h4>
-                
-                {progress && (
-                  <div className="space-y-3">
-                    <div className="text-sm">
-                      <p className="font-semibold">Progress: {progress.currentStep}/{progress.totalSteps} steps</p>
-                      <div className="w-full bg-gray-300 rounded-full h-2 mt-1">
-                        <div 
-                          className="bg-blue-600 h-2 rounded-full transition-all"
-                          style={{width: `${progress.totalSteps > 0 ? (progress.currentStep / progress.totalSteps * 100) : 0}%`}}
-                        ></div>
+            <div className="space-y-6 p-6">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Job ID
+                  </p>
+                  <code className="mt-2 block rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-800">
+                    {jobId}
+                  </code>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Status
+                  </p>
+                  <span
+                    className={`mt-2 inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${
+                      statusTone[jobStatus] || statusTone.pending
+                    }`}
+                  >
+                    {jobStatus || "pending"}
+                  </span>
+                </div>
+              </div>
+
+              {!isTerminalStatus && (
+                <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-5">
+                  <h4 className="mb-3 text-base font-bold text-slate-900">
+                    Execution Progress
+                  </h4>
+
+                  {progress ? (
+                    <div className="space-y-4">
+                      <div>
+                        <div className="flex items-center justify-between text-sm font-semibold text-slate-700">
+                          <span>
+                            Step {progress.currentStep}/{progress.totalSteps}
+                          </span>
+                          <span>{completionPercent}%</span>
+                        </div>
+                        <div className="mt-2 h-2.5 w-full rounded-full bg-slate-200">
+                          <div
+                            className="h-2.5 rounded-full bg-gradient-to-r from-sky-500 to-cyan-500 transition-all"
+                            style={{ width: `${completionPercent}%` }}
+                          />
+                        </div>
                       </div>
+
+                      {progress.completedSteps && progress.completedSteps.length > 0 && (
+                        <div>
+                          <p className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-emerald-700">
+                            <CheckCircle2 className="h-4 w-4" />
+                            Completed ({progress.completedSteps.length})
+                          </p>
+                          <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-emerald-200 bg-white p-2 text-xs">
+                            {progress.completedSteps.map((s, i) => (
+                              <div key={i} className="rounded-md bg-emerald-50 px-2 py-1 text-emerald-700">
+                                Step {s.step}: {s.description || s.action}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {progress.failedSteps && progress.failedSteps.length > 0 && (
+                        <div>
+                          <p className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-rose-700">
+                            <XCircle className="h-4 w-4" />
+                            Failed ({progress.failedSteps.length})
+                          </p>
+                          <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-rose-200 bg-white p-2 text-xs">
+                            {progress.failedSteps.map((s, i) => (
+                              <div key={i} className="rounded-md bg-rose-50 px-2 py-1 text-rose-700">
+                                Step {s.step + 1}: {s.description || s.action} -{" "}
+                                {s.error?.slice(0, 50)}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {progress.totalSteps > completedCount + failedCount && (
+                        <div className="rounded-xl border border-sky-200 bg-white p-3">
+                          <p className="text-sm font-semibold text-slate-800">
+                            Currently Executing
+                          </p>
+                          <p className="mt-1 text-xs font-semibold text-sky-700">
+                            Step {progress.currentStep + 1}/{progress.totalSteps}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600">
+                            {progress.currentDescription || "Processing..."}
+                          </p>
+                          <p className="mt-2 text-xs text-slate-500">
+                            Waiting for {remainingSteps} more steps...
+                          </p>
+                        </div>
+                      )}
                     </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-2 text-sm text-slate-700">
+                      <Loader2 className="h-4 w-4 animate-spin text-sky-600" />
+                      Initializing execution...
+                    </div>
+                  )}
+                </div>
+              )}
 
-                    {progress.completedSteps && progress.completedSteps.length > 0 && (
-                      <div>
-                        <p className="text-sm font-semibold text-green-700">✓ Completed ({progress.completedSteps.length}):</p>
-                        <div className="bg-white rounded p-2 text-xs max-h-32 overflow-y-auto">
-                          {progress.completedSteps.map((s, i) => (
-                            <div key={i} className="text-green-600">
-                              Step {s.step}: {s.description || s.action}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+              {result && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
+                  <h4 className="mb-3 text-lg font-bold text-slate-900">Test Results</h4>
+                  {result.success ? (
+                    <div className="space-y-4 text-sm">
+                      {result.executed && Array.isArray(result.executed) && (
+                        <div>
+                          <p className="mb-3 text-sm font-semibold text-sky-800">
+                            Test Cases: {result.executed.length}
+                          </p>
 
-                    {progress.failedSteps && progress.failedSteps.length > 0 && (
-                      <div>
-                        <p className="text-sm font-semibold text-red-700">✗ Failed ({progress.failedSteps.length}):</p>
-                        <div className="bg-white rounded p-2 text-xs max-h-32 overflow-y-auto">
-                          {progress.failedSteps.map((s, i) => (
-                            <div key={i} className="text-red-600">
-                              Step {s.step + 1}: {s.description || s.action} - {s.error?.slice(0, 50)}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                          <div className="space-y-2">
+                            {result.executed.map((testCase, testIdx) => {
+                              const testPassed =
+                                testCase.results &&
+                                testCase.results.every((r) => r.ok !== false);
+                              const totalSteps = testCase.results
+                                ? testCase.results.length
+                                : 0;
+                              const passedSteps = testCase.results
+                                ? testCase.results.filter((r) => r.ok).length
+                                : 0;
 
-                    {progress.totalSteps > (progress.completedSteps?.length || 0) + (progress.failedSteps?.length || 0) && (
-                      <div>
-                        <p className="text-sm font-semibold text-gray-700">Currently Executing:</p>
-                        <div className="bg-blue-50 p-2 rounded border border-blue-200 text-xs text-blue-900">
-                          <p className="font-semibold">Step {progress.currentStep + 1}/{progress.totalSteps}</p>
-                          <p className="mt-1">{progress.currentDescription || 'Processing...'}</p>
-                        </div>
-                        <p className="text-xs text-gray-600 mt-2">
-                          Waiting for {progress.totalSteps - ((progress.completedSteps?.length || 0) + (progress.failedSteps?.length || 0))} more steps...
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {!progress && (
-                  <div className="flex items-center gap-2">
-                    <div className="animate-spin w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
-                    <span className="text-sm">Initializing execution...</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Results */}
-            {result && (
-              <div className="mt-4 p-4 bg-gray-50 rounded border border-gray-200">
-                <h4 className="font-bold mb-2 text-lg">Test Results</h4>
-                {result.success ? (
-                  <div className="space-y-3 text-sm">
-                    {result.executed && Array.isArray(result.executed) && (
-                      <div>
-                        <p className="font-semibold text-blue-800 mb-3">
-                          Test Cases: {result.executed.length}
-                        </p>
-                        
-                        <div className="space-y-2">
-                          {result.executed.map((testCase, testIdx) => {
-                            const testPassed = testCase.results && testCase.results.every(r => r.ok !== false);
-                            const totalSteps = testCase.results ? testCase.results.length : 0;
-                            const passedSteps = testCase.results ? testCase.results.filter(r => r.ok).length : 0;
-                            
-                            return (
-                              <details key={testIdx} className="bg-white rounded border border-gray-300 overflow-hidden">
-                                <summary className={`p-3 cursor-pointer font-semibold text-sm flex justify-between items-center hover:bg-gray-100 ${
-                                  testPassed ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50'
-                                }`}>
-                                  <span className="flex-1">
-                                    {testPassed ? '✓' : '✗'} {testCase.test_name}
-                                  </span>
-                                  <span className="text-xs text-gray-600 font-normal">
-                                    {passedSteps}/{totalSteps} steps passed
-                                  </span>
-                                </summary>
-                                
-                                <div className="p-4 border-t border-gray-200 space-y-2 max-h-96 overflow-y-auto">
-                                  {testCase.results && testCase.results.map((step, stepIdx) => (
-                                    <div key={stepIdx} className={`text-xs p-2 rounded border-l-4 ${
-                                      step.ok ? 'border-green-500 bg-green-50 text-green-800' : 'border-red-500 bg-red-50 text-red-800'
-                                    }`}>
-                                      <div className="font-semibold">
-                                        Step {step.step + 1}: {step.description || step.action}
-                                      </div>
-                                      {step.action && (
-                                        <div className="text-xs text-gray-600 mt-1">
-                                          Action: <strong>{step.action}</strong>
-                                          {step.value && ` | Value: ${String(step.value).substring(0, 40)}`}
-                                        </div>
+                              return (
+                                <details
+                                  key={testIdx}
+                                  className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+                                >
+                                  <summary
+                                    className={`flex cursor-pointer items-center justify-between gap-3 p-3 text-sm font-semibold ${
+                                      testPassed
+                                        ? "bg-emerald-50 text-emerald-700"
+                                        : "bg-rose-50 text-rose-700"
+                                    }`}
+                                  >
+                                    <span className="inline-flex items-center gap-2">
+                                      {testPassed ? (
+                                        <CheckCircle2 className="h-4 w-4" />
+                                      ) : (
+                                        <XCircle className="h-4 w-4" />
                                       )}
-                                      {step.error && (
-                                        <div className="text-xs mt-1 font-mono bg-red-100 p-1 rounded">
-                                          Error: {step.error}
-                                        </div>
-                                      )}
-                                      {step.locator && (
-                                        <div className="text-xs mt-1 font-mono bg-gray-100 p-1 rounded">
-                                          Locator ({step.type}): {String(step.locator).substring(0, 60)}...
-                                        </div>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              </details>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    
-                    {result.parsed && (
-                      <div className="mt-4 pt-4 border-t border-gray-300">
-                        <p className="font-semibold text-blue-800 mb-2">Parsed Test Cases:</p>
-                        <details>
-                          <summary className="cursor-pointer text-xs text-gray-600 hover:text-gray-800">View Details</summary>
-                          <pre className="bg-white p-2 rounded text-xs overflow-auto max-h-48 border border-gray-300 mt-1">
-                            {JSON.stringify(result.parsed, null, 2)}
-                          </pre>
-                        </details>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div>
-                    <p className="text-red-700 font-semibold">✗ Processing failed</p>
-                    <p className="text-sm mt-1 text-red-600">{result.error || 'Unknown error'}</p>
-                  </div>
-                )}
-              </div>
-            )}
+                                      {testCase.test_name}
+                                    </span>
+                                    <span className="text-xs font-medium text-slate-600">
+                                      {passedSteps}/{totalSteps} steps passed
+                                    </span>
+                                  </summary>
 
-            {/* Reset Button */}
-            <Button onClick={resetForm} className="bg-gray-600 text-white mt-4">
-              Start New Job
-            </Button>
+                                  <div className="max-h-96 space-y-2 overflow-y-auto border-t border-slate-200 p-4">
+                                    {testCase.results &&
+                                      testCase.results.map((step, stepIdx) => (
+                                        <div
+                                          key={stepIdx}
+                                          className={`rounded-lg border-l-4 p-2 text-xs ${
+                                            step.ok
+                                              ? "border-emerald-500 bg-emerald-50 text-emerald-800"
+                                              : "border-rose-500 bg-rose-50 text-rose-800"
+                                          }`}
+                                        >
+                                          <div className="font-semibold">
+                                            Step {step.step + 1}:{" "}
+                                            {step.description || step.action}
+                                          </div>
+                                          {step.action && (
+                                            <div className="mt-1 text-slate-700">
+                                              Action: <strong>{step.action}</strong>
+                                              {step.value &&
+                                                ` | Value: ${String(step.value).substring(0, 40)}`}
+                                            </div>
+                                          )}
+                                          {step.error && (
+                                            <div className="mt-1 rounded bg-rose-100 p-1 font-mono text-rose-700">
+                                              Error: {step.error}
+                                            </div>
+                                          )}
+                                          {step.locator && (
+                                            <div className="mt-1 rounded bg-slate-100 p-1 font-mono text-slate-700">
+                                              Locator ({step.type}):{" "}
+                                              {String(step.locator).substring(0, 60)}...
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                  </div>
+                                </details>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {result.parsed && (
+                        <div className="border-t border-slate-200 pt-4">
+                          <p className="mb-2 text-sm font-semibold text-sky-800">
+                            Parsed Test Cases
+                          </p>
+                          <details>
+                            <summary className="cursor-pointer text-xs font-semibold text-slate-600 hover:text-slate-800">
+                              View Parsed JSON
+                            </summary>
+                            <pre className="mt-2 max-h-56 overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700">
+                              {JSON.stringify(result.parsed, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="inline-flex items-center gap-2 text-sm font-semibold text-rose-700">
+                        <XCircle className="h-4 w-4" />
+                        Processing failed
+                      </p>
+                      <p className="mt-1 text-sm text-rose-600">
+                        {result.error || "Unknown error"}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {message && (
+                <div
+                  className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                    isMessageError
+                      ? "bg-rose-50 text-rose-700"
+                      : "bg-emerald-50 text-emerald-700"
+                  }`}
+                >
+                  <Clock3 className="h-3.5 w-3.5" />
+                  {message}
+                </div>
+              )}
+            </div>
           </Card>
         )}
       </div>

@@ -8,10 +8,7 @@ const Card = React.forwardRef(function Card(
   return (
     <div
       ref={ref}
-      className={cn(
-        "rounded-lg border bg-card text-card-foreground shadow-sm",
-        className
-      )}
+      className={cn("ui-card", className)}
       {...props}
     />
   );
@@ -53,7 +50,7 @@ const CardDescription = React.forwardRef(function CardDescription(
   return (
     <div
       ref={ref}
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn("text-sm text-slate-600", className)}
       {...props}
     />
   );
